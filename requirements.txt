@@ -1,0 +1,9 @@
+langgraph
+langchain
+flask
+langchain-openai
+dotenv
+pydantic
+bs4
+langchain-google-vertexai
+langchain-google-genai
