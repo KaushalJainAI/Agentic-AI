@@ -7,3 +7,10 @@ pydantic
 bs4
 langchain-google-vertexai
 langchain-google-genai
+tavily-python
+numpy
+pandas 
+matplotlib
+seaborn
+scikit-learn
+scipy

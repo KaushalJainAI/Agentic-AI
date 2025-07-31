@@ -52,7 +52,7 @@ if __name__ == "__main__":
 
 # deep_seek_key = os.getenv("DEEPSEEK_API_KEY")
 
-# open_router_key = "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"
+# open_router_key = os.getenv("OPEN_ROUTER_KEY")
 # open_router_url = "https://openrouter.ai/api/v1"
 
 # # client = OpenAI(api_key=open_router_key, base_url=open_router_url)
