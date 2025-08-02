@@ -8,9 +8,13 @@ bs4
 langchain-google-vertexai
 langchain-google-genai
 tavily-python
-numpy
+numpy==1.24
 pandas 
 matplotlib
 seaborn
 scikit-learn
 scipy
+faiss-cpu
+sentence-transformers
+# protobuf==3.20.3
+python-telegram-bot

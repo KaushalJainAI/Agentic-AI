@@ -4,7 +4,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain.chat_models import init_chat_model
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, field_validator, ConfigDict
 from langchain.prompts import ChatPromptTemplate
 from bs4 import BeautifulSoup
 import os 
@@ -17,6 +17,8 @@ import requests
 import io
 from collections import defaultdict
 from contextlib import redirect_stdout
+from datetime import datetime
+
 
 load_dotenv()
 
@@ -184,14 +186,14 @@ class Plan(BaseModel):
     Using SchemaDefinition here provides strong validation.
     """
     search_query: str = Field(..., description="A concise and effective search engine query designed to find the required information.")
-    schema: Dict[str, SchemaDefinition] = Field(..., description="The structured output schema, where each key is a field name and the value defines its type and description.")
+    Planschema: Dict[str, SchemaDefinition] = Field(..., description="The structured output schema, where each key is a field name and the value defines its type and description.")
 
 class GraphState(TypedDict):
     """Represents the state of our graph."""
     prompt: str
     search_query: str
     # Note: We still use Dict[str, Any] here for the state itself, as the validation happens in the node.
-    schema: Dict[str, Any] 
+    PlanSchema: Dict[str, Any] 
     urls: List[str]
     scraped_content: str
     structured_output: Dict[str, Any]
@@ -266,19 +268,19 @@ class WebScrapingAgent:
             return f"Failed to scrape {url}. Error: {e}"
 
     def plan_node(self, state: GraphState) -> Dict[str, Any]:
-        """Node to generate a search query and a Pydantic schema."""
+        """Node to generate a search query and a Pydantic PlanSchema."""
         print("--- PLAN ---")
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", 
-            """You are an expert research planner. Your task is to create a focused search query and a detailed schema to answer the user's request.
+            """You are an expert scrapping agent. Your task is to create a focused search query and a detailed PlanSchema to answer the user's request.
             
-            For the schema field, return a dictionary where:
+            For the PlanSchema field, return a dictionary where:
             - Each key is a field name (string)
             - Each value is an object with exactly two properties:
             * "type": a string representing the Python type (e.g., "str", "int", "List[str]", "Optional[str]")
             * "description": a string describing what this field represents
             
-            Keep the schema focused with 3-6 relevant fields maximum."""
+            Keep the PlanSchema focused with 3-6 relevant fields maximum."""
             ),
             ("user", "Research request: {prompt}")
         ])
@@ -287,9 +289,9 @@ class WebScrapingAgent:
             planner = prompt_template | self.llm.with_structured_output(Plan)
             plan_result = planner.invoke({"prompt": state['prompt']})
             
-            # Convert SchemaDefinition objects to simple dictionaries
+            # Convert PlanSchemaDefinition objects to simple dictionaries
             schema_as_dict = {}
-            for key, schema_def in plan_result.schema.items():
+            for key, schema_def in plan_result.PlanSchema.items():
                 schema_as_dict[key] = {
                     "type": schema_def.type,
                     "description": schema_def.description
@@ -297,7 +299,7 @@ class WebScrapingAgent:
             
             return {
                 "search_query": plan_result.search_query, 
-                "schema": schema_as_dict
+                "PlanSchema": schema_as_dict
             }
         
         except Exception as e:
@@ -305,7 +307,7 @@ class WebScrapingAgent:
             # Fallback schema
             return {
                 "search_query": state['prompt'],
-                "schema": {
+                "PlanSchema": {
                     "main_content": {
                         "type": "str", 
                         "description": "Main content extracted from the research"
@@ -321,7 +323,7 @@ class WebScrapingAgent:
     def search_node(self, state: GraphState) -> Dict[str, Any]:
         """Node to perform a web search."""
         print("--- SEARCH ---")
-        search_results = self.tavily_client.search(query=state['search_query'], max_results=5)
+        search_results = self.tavily_client.search(query=state['search_query'], max_results=20)
         urls = [result['url'] for result in search_results['results']]
         return {"urls": urls}
 
@@ -377,20 +379,20 @@ class WebScrapingAgent:
         return type_mapping.get(type_str, str)  # Default to str if not found
 
     def extract_node(self, state: GraphState) -> Dict[str, Any]:
-        """Node to extract information based on the dynamic schema."""
+        """Node to extract information based on the dynamic PlanSchema."""
         print("--- EXTRACT ---")
         
         try:
             # Create dynamic model with safe type conversion
             field_definitions = {}
-            for key, val in state['schema'].items():
+            for key, val in state['PlanSchema'].items():
                 field_type = self._safe_type_conversion(val['type'])
                 field_definitions[key] = (field_type, Field(description=val['description']))
             
             DynamicModel = create_model('DynamicModel', **field_definitions)
             
             prompt_template = ChatPromptTemplate.from_messages([
-                ("system", "You are an expert data extractor. Extract the relevant information from the provided text that precisely answers the user's goal and format it according to the provided schema."),
+                ("system", "You are an expert data extractor. Extract the relevant information from the provided text that precisely answers the user's goal and format it according to the provided PlanSchema."),
                 ("user", "User Goal: {prompt}\n\nWebpage Content:\n{content}")
             ])
             
@@ -438,37 +440,32 @@ class WebScrapingAgent:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class DatabaseDefinition(BaseModel):
-    """Definition of a database file with metadata."""
-    file_path: str = Field(description="Path to the database file")
-    description: str = Field(description="Description of what data this database contains")
-    relevance_score: float = Field(description="How relevant this database is to the query (0-1)")
-
-class DatabaseSelection(BaseModel):
-    """Selection of the most relevant database."""
-    selected_database: str = Field(description="Path to the selected database file")
-    reasoning: str = Field(description="Why this database was selected")
 
 class QueryPlan(BaseModel):
-    """Plan for querying the database."""
-    sql_query: str = Field(description="SQL query to execute")
-    expected_columns: List[str] = Field(description="Expected column names in the result")
-    query_explanation: str = Field(description="Explanation of what the query does")
+    """Model for SQL query planning."""
+    sql_query: str = Field(description="The SQL query to execute")
+    reasoning: str = Field(description="Reasoning behind the query structure")
+    expected_columns: List[str] = Field(description="Expected columns in the result")
 
-class SQLGraphState(TypedDict):
-    """Represents the state of our SQL agent graph."""
-    prompt: str
-    available_databases: List[Dict[str, Any]]
-    selected_database: str
-    database_schema: Dict[str, Any]
-    sql_query: str
-    query_results: List[Dict[str, Any]]
-    structured_output: Dict[str, Any]
-    error_message: Optional[str]
+class ExecutionStep(BaseModel):
+    """Model for a single execution step in flat file processing."""
+    operation: str = Field(description="Operation type: load, merge, filter, groupby, select")
+    args: Dict[str, Any] = Field(description="Arguments for the operation")
+    result_df: str = Field(description="Name of the resulting dataframe")
+    description: str = Field(description="Human readable description of this step")
 
-class SQL_CRUD_agent:
+class ExecutionPlan(BaseModel):
+    """Model for flat file execution planning."""
+    steps: List[ExecutionStep] = Field(description="List of execution steps")
+    reasoning: str = Field(description="Overall reasoning for the execution plan")
+    expected_result: str = Field(description="Description of expected final result")
+
+
+
+
+class DatabaseDiscoveryAgent:
     """
-    An agent that searches for relevant database files and queries them for information.
+    Agent that finds the most relevant database (SQL or flat file) based on the query.
     """
     
     def __init__(
@@ -477,31 +474,17 @@ class SQL_CRUD_agent:
         model_provider: str = "google_genai",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
-        database_directory: str = "./Databases",
-        database_descriptions: Optional[Dict[str, str]] = None
+        database_directory: str = "./Databases"
     ):
-        """
-        Initialize the SQL CRUD agent.
-        
-        Args:
-            model: Model name to use
-            model_provider: Provider for the model
-            temperature: Temperature setting for response generation
-            api_key: API key (if None, will try to get from environment)
-            database_directory: Directory containing database files
-            database_descriptions: Dictionary mapping database file names to descriptions
-        """
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.database_directory = database_directory
-        self.database_descriptions = database_descriptions or {}
         
         if not self.api_key:
             raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
         
-        # Initialize the LLM
         try:
             self.llm = init_chat_model(
                 model=self.model,
@@ -512,50 +495,157 @@ class SQL_CRUD_agent:
         except Exception as e:
             raise ValueError(f"Failed to initialize LLM: {e}")
 
-        # Compile the graph and store it as an instance variable
-        self.app = self._build_graph()
-
-    def _build_graph(self):
-        """Builds and compiles the LangGraph workflow."""
-        workflow = StateGraph(SQLGraphState)
+    def _get_all_databases(self) -> List[Dict[str, Any]]:
+        """Get all databases (both SQL and flat files) with their descriptions."""
+        databases = []
         
-        # Add nodes
-        workflow.add_node("discover_databases", self.discover_databases_node)
-        workflow.add_node("select_database", self.select_database_node)
-        workflow.add_node("analyze_schema", self.analyze_schema_node)
-        workflow.add_node("generate_query", self.generate_query_node)
-        workflow.add_node("execute_query", self.execute_query_node)
-        workflow.add_node("format_results", self.format_results_node)
+        # SQL database extensions
+        sql_extensions = ['*.db', '*.sqlite', '*.sqlite3']
         
-        # Define the workflow
-        workflow.set_entry_point("discover_databases")
-        workflow.add_edge("discover_databases", "select_database")
-        workflow.add_edge("select_database", "analyze_schema")
-        workflow.add_edge("analyze_schema", "generate_query")
-        workflow.add_edge("generate_query", "execute_query")
-        workflow.add_edge("execute_query", "format_results")
-        workflow.add_edge("format_results", END)
+        # Flat file extensions
+        flat_extensions = ['*.csv', '*.tsv', '*.xlsx', '*.json']
         
-        return workflow.compile()
-
-    def _get_database_files(self) -> List[str]:
-        """
-        Get all database files by searching recursively through the specified directory 
-        and its subdirectories.
-        """
-        db_extensions = ['*.db', '*.sqlite', '*.sqlite3']
-        db_files = []
+        all_extensions = sql_extensions + flat_extensions
         
-        for extension in db_extensions:
-            # The '**' component in the pattern combined with `recursive=True`
-            # enables searching in all subdirectories.
+        for extension in all_extensions:
             pattern = os.path.join(self.database_directory, '**', extension)
-            db_files.extend(glob.glob(pattern, recursive=True))
+            files = glob.glob(pattern, recursive=True)
+            
+            for file_path in files:
+                db_name = os.path.basename(file_path)
+                db_directory = os.path.dirname(file_path)
+                description = "No description file found."
+                
+                # Look for description.txt in the same directory
+                description_file = os.path.join(db_directory, 'description.txt')
+                if os.path.exists(description_file):
+                    try:
+                        with open(description_file, 'r', encoding='utf-8') as f:
+                            description = f.read().strip()
+                    except Exception as e:
+                        description = f"Error reading description file: {e}"
+                
+                # Determine database type
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext in ['.db', '.sqlite', '.sqlite3']:
+                    db_type = 'sql'
+                else:
+                    db_type = 'flat_file'
+                
+                databases.append({
+                    "file_path": file_path,
+                    "name": db_name,
+                    "description": description,
+                    "type": db_type,
+                    "directory": db_directory
+                })
         
-        return db_files
+        return databases
+
+    def select_best_database(self, query: str) -> Dict[str, Any]:
+        """
+        Select the most relevant database for the given query.
+        Returns database info and recommended agent type.
+        """
+        try:
+            available_databases = self._get_all_databases()
+            
+            if not available_databases:
+                return {"error": "No databases found in the specified directory"}
+            
+            # Create safe descriptions for the LLM prompt
+            safe_db_lines = []
+            for db in available_databases:
+                safe_name = db['name'].replace('{', '{{').replace('}', '}}')
+                safe_desc = db['description'].replace('{', '{{').replace('}', '}}')
+                safe_type = db['type'].replace('{', '{{').replace('}', '}}')
+                safe_db_lines.append(f"- {safe_name} ({safe_type}): {safe_desc}")
+            
+            db_list = "\n".join(safe_db_lines)
+            
+            class DatabaseRecommendation(BaseModel):
+                selected_database_name: str = Field(description="Name of the selected database file")
+                database_type: str = Field(description="Type of database: 'sql' or 'flat_file'")
+                recommended_agent: str = Field(description="Recommended agent: 'SQL_Agent' or 'FlatFile_Agent'")
+                reasoning: str = Field(description="Reasoning for the selection")
+                confidence_score: float = Field(description="Confidence in the selection (0-1)")
+            
+            prompt_template = ChatPromptTemplate.from_messages([
+                ("system", 
+                f"""You are a database selection expert. Given a user query and a list of available databases, select the most relevant database and recommend the appropriate agent.
+
+                Available databases:
+                {db_list}
+
+                For each database, you can see:
+                - Database name
+                - Type (sql for SQLite databases, flat_file for CSV/Excel/JSON files)
+                - Description from the description.txt file
+
+                Rules:
+                - If you select a 'sql' type database, recommend 'SQL_Agent'
+                - If you select a 'flat_file' type database, recommend 'FlatFile_Agent'
+                - Choose based on which database description best matches the user's query
+                - Provide a confidence score between 0 and 1"""),
+                ("user", "User Query: {query}")
+            ])
+            
+            selector = prompt_template | self.llm.with_structured_output(DatabaseRecommendation)
+            recommendation = selector.invoke({"query": query})
+            
+            # Find the full database info
+            selected_db = None
+            for db in available_databases:
+                if db["name"] == recommendation.selected_database_name:
+                    selected_db = db
+                    break
+            
+            if not selected_db:
+                return {"error": f"Could not find selected database: {recommendation.selected_database_name}"}
+            
+            return {
+                "database_info": selected_db,
+                "recommended_agent": recommendation.recommended_agent,
+                "reasoning": recommendation.reasoning,
+                "confidence_score": recommendation.confidence_score
+            }
+            
+        except Exception as e:
+            return {"error": f"Failed to select database: {str(e)}"}
+
+
+class SQLQueryAgent:
+    """
+    Agent focused purely on executing SQL queries on a given database.
+    """
+    
+    def __init__(
+        self,
+        model: str = "gemini-2.5-pro",
+        model_provider: str = "google_genai",
+        temperature: float = 0.7,
+        api_key: Optional[str] = None
+    ):
+        self.model = model
+        self.model_provider = model_provider
+        self.temperature = temperature
+        self.api_key = api_key or os.getenv("LLM_API_KEY")
+        
+        if not self.api_key:
+            raise ValueError("API key is required.")
+        
+        try:
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to initialize LLM: {e}")
 
     def _get_database_schema(self, db_path: str) -> Dict[str, Any]:
-        """Get the schema of a database."""
+        """Get the schema of a SQLite database."""
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
@@ -594,129 +684,15 @@ class SQL_CRUD_agent:
             logger.error(f"Error getting schema for {db_path}: {e}")
             return {}
 
-    def discover_databases_node(self, state: SQLGraphState) -> Dict[str, Any]:
+    def query_database(self, db_path: str, user_query: str) -> Dict[str, Any]:
         """
-        Node to discover available database files and their descriptions from local text files.
+        Execute a query on the specified SQL database.
         """
-        # logger.info("--- DISCOVER DATABASES AND DESCRIPTIONS ---")
-        
         try:
-            db_files = self._get_database_files()
-            available_databases = []
-
-            for db_file in db_files:
-                db_name = os.path.basename(db_file)
-                db_directory = os.path.dirname(db_file)
-                description = "No description file found."  # Default description
-
-                # Search for any .txt file in the database's directory
-                description_files = glob.glob(os.path.join(db_directory, '*.txt'))
-                
-                if description_files:
-                    # If a .txt file is found, try to read it
-                    try:
-                        with open(description_files[0], 'r', encoding='utf-8') as f:
-                            description = f.read().strip()
-                    except Exception as e:
-                        description = f"Error reading description file: {e}"
-
-                available_databases.append({
-                    "file_path": db_file,
-                    "name": db_name,
-                    "description": description
-                })
-            
-            if not available_databases:
-                return {"error_message": "No database files found in the specified directory"}
-            
-            return {"available_databases": available_databases}
-            
-        except Exception as e:
-            # logger.error(f"Error in discover_databases_node: {e}")
-            return {"error_message": f"Failed to discover databases: {str(e)}"}
-
-    def select_database_node(self, state: SQLGraphState) -> Dict[str, Any]:
-        """Node to select the most relevant database."""
-        # logger.info("--- SELECT DATABASE ---")
-        
-        if state.get("error_message"):
-            return {}
-        
-        try:
-            available_dbs = state["available_databases"]
-            
-            # --- FIX STARTS HERE ---
-            # Create a "safe" list of descriptions by escaping curly braces
-            safe_db_lines = []
-            for db in available_dbs:
-                # Escape braces in the name and description to prevent format errors
-                safe_name = db['name'].replace('{', '{{').replace('}', '}}')
-                safe_desc = db['description'].replace('{', '{{').replace('}', '}}')
-                safe_db_lines.append(f"- {safe_name}: {safe_desc}")
-            
-            db_list = "\n".join(safe_db_lines)
-            # --- FIX ENDS HERE ---
-
-            prompt_template = ChatPromptTemplate.from_messages([
-                ("system", 
-                f"""You are a database selection expert. Given a user query and a list of available databases, select the most relevant database filename.
-                
-                Available databases:
-                {db_list}
-                
-                Return only the filename of the database that is most likely to contain information relevant to the user's query."""),
-                ("user", "Query: {prompt}")
-            ])
-            
-            selector = prompt_template | self.llm.with_structured_output(DatabaseSelection)
-            selection = selector.invoke({"prompt": state["prompt"]})
-            
-            # Find the full path for the selected database with more robust matching
-            selected_db_path = None
-            for db in available_dbs:
-                # Match the exact filename returned by the LLM
-                if db["name"] == selection.selected_database:
-                    selected_db_path = db["file_path"]
-                    break
-            
-            if not selected_db_path:
-                return {"error_message": f"Could not find the selected database file: {selection.selected_database}"}
-            
-            return {"selected_database": selected_db_path}
-            
-        except Exception as e:
-            # logger.error(f"Error in select_database_node: {e}")
-            return {"error_message": f"Failed to select database: {str(e)}"}
-
-    def analyze_schema_node(self, state: SQLGraphState) -> Dict[str, Any]:
-        """Node to analyze the schema of the selected database."""
-        logger.info("--- ANALYZE SCHEMA ---")
-        
-        if state.get("error_message"):
-            return {}
-        
-        try:
-            db_path = state["selected_database"]
+            # Get database schema
             schema = self._get_database_schema(db_path)
-            
             if not schema:
-                return {"error_message": "Could not analyze database schema"}
-            
-            return {"database_schema": schema}
-            
-        except Exception as e:
-            logger.error(f"Error in analyze_schema_node: {e}")
-            return {"error_message": f"Failed to analyze schema: {str(e)}"}
-
-    def generate_query_node(self, state: SQLGraphState) -> Dict[str, Any]:
-        """Node to generate SQL query based on the prompt and schema."""
-        logger.info("--- GENERATE QUERY ---")
-        
-        if state.get("error_message"):
-            return {}
-        
-        try:
-            schema = state["database_schema"]
+                return {"error": "Could not analyze database schema"}
             
             # Format schema for LLM
             schema_description = ""
@@ -731,6 +707,7 @@ class SQL_CRUD_agent:
                     for row in table_info["sample_data"][:2]:
                         schema_description += f"  {row}\n"
             
+            # Generate SQL query
             prompt_template = ChatPromptTemplate.from_messages([
                 ("system", 
                  f"""You are an expert SQL query generator. Given a user request and database schema, generate an appropriate SQL query.
@@ -743,34 +720,18 @@ class SQL_CRUD_agent:
                  - Use appropriate JOINs if multiple tables are needed
                  - Include LIMIT clauses if the result might be large
                  - Be precise and only query what's needed"""),
-                ("user", "Query request: {prompt}")
+                ("user", "Query request: {query}")
             ])
             
             query_generator = prompt_template | self.llm.with_structured_output(QueryPlan)
-            query_plan = query_generator.invoke({"prompt": state["prompt"]})
+            query_plan = query_generator.invoke({"query": user_query})
             
-            return {"sql_query": query_plan.sql_query}
-            
-        except Exception as e:
-            logger.error(f"Error in generate_query_node: {e}")
-            return {"error_message": f"Failed to generate query: {str(e)}"}
-
-    def execute_query_node(self, state: SQLGraphState) -> Dict[str, Any]:
-        """Node to execute the SQL query."""
-        logger.info("--- EXECUTE QUERY ---")
-        
-        if state.get("error_message"):
-            return {}
-        
-        try:
-            db_path = state["selected_database"]
-            sql_query = state["sql_query"]
-            
+            # Execute the query
             conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row  # This allows accessing columns by name
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            cursor.execute(sql_query)
+            cursor.execute(query_plan.sql_query)
             rows = cursor.fetchall()
             
             # Convert rows to list of dictionaries
@@ -780,143 +741,65 @@ class SQL_CRUD_agent:
             
             conn.close()
             
-            return {"query_results": results}
-            
-        except Exception as e:
-            logger.error(f"Error in execute_query_node: {e}")
-            return {"error_message": f"Failed to execute query: {str(e)}"}
-
-    def format_results_node(self, state: SQLGraphState) -> Dict[str, Any]:
-        """Node to format the query results."""
-        logger.info("--- FORMAT RESULTS ---")
-        
-        if state.get("error_message"):
-            return {"structured_output": {"error": state["error_message"]}}
-        
-        try:
-            results = state["query_results"]
-            
-            if not results:
-                return {"structured_output": {"message": "No results found"}}
-            
-            # Format results based on the original prompt
-            prompt_template = ChatPromptTemplate.from_messages([
-                ("system", 
-                 """You are a data formatter. Given query results and the original user request, format the data in a meaningful way.
-                 
-                 Return a structured summary that directly answers the user's question based on the query results."""),
-                ("user", "Original request: {prompt}\n\nQuery results: {results}")
-            ])
-            
-            # Create a simple output model
+            # Format results
             class FormattedOutput(BaseModel):
                 summary: str = Field(description="Summary of the findings")
                 total_records: int = Field(description="Number of records found")
                 key_findings: List[str] = Field(description="Key insights from the data")
+                sql_query_used: str = Field(description="The SQL query that was executed")
                 raw_data: List[Dict[str, Any]] = Field(description="Raw query results")
             
-            formatter = prompt_template | self.llm.with_structured_output(FormattedOutput)
+            if not results:
+                return {
+                    "summary": "No results found for the query",
+                    "total_records": 0,
+                    "key_findings": ["No data matched the query criteria"],
+                    "sql_query_used": query_plan.sql_query,
+                    "raw_data": []
+                }
+            
+            # Format the results using LLM
+            format_template = ChatPromptTemplate.from_messages([
+                ("system", 
+                 """You are a data formatter. Given query results and the original user request, format the data meaningfully."""),
+                ("user", "Original request: {query}\n\nQuery results: {results}")
+            ])
+            
+            formatter = format_template | self.llm.with_structured_output(FormattedOutput)
             formatted_output = formatter.invoke({
-                "prompt": state["prompt"],
+                "query": user_query,
                 "results": json.dumps(results, indent=2)
             })
             
-            return {"structured_output": formatted_output.dict()}
+            # Add the SQL query to the output
+            output_dict = formatted_output.dict()
+            output_dict["sql_query_used"] = query_plan.sql_query
+            
+            return output_dict
             
         except Exception as e:
-            logger.error(f"Error in format_results_node: {e}")
-            return {"structured_output": {"error": f"Failed to format results: {str(e)}"}}
-
-    def run(self, prompt: str) -> Dict[str, Any]:
-        """The main entry point to run the SQL CRUD agent."""
-        if not prompt or not prompt.strip():
-            raise ValueError("Prompt cannot be empty")
-        
-        try:
-            inputs = {"prompt": prompt.strip()}
-            final_state = self.app.invoke(inputs)
-            return final_state.get('structured_output', {"error": "No output generated"})
-        except Exception as e:
-            logger.error(f"Error running SQL agent: {e}")
-            return {"error": f"Agent execution failed: {str(e)}"}
-
-    def run_and_stream_watch(self, prompt: str) -> Dict[str, Any]:
-        """
-        Run the agent with streaming output to see each step.
-        """
-        inputs = {"prompt": prompt}
-        final_state = {}
-
-        print("--- 🗄️ Starting SQL CRUD Agent Run ---")
-        for output in self.app.stream(inputs, {"recursion_limit": 10}):
-            for key, value in output.items():
-                print(f"\n--- ✅ Output from node: {key} ---")
-                print(json.dumps(value, indent=2, ensure_ascii=False))
-                final_state = value
-
-        print("\n--- 🏁 SQL Agent Finished ---")
-        return final_state.get('structured_output', {"error": "Agent failed to produce a structured output."})
-
-class PandasOperation(BaseModel):
-    """A single data manipulation step using pandas."""
-    operation: str = Field(description="The pandas operation to perform, e.g., 'load', 'merge', 'filter', 'groupby', 'select'.")
-    args: Dict[str, Any] = Field(description="Arguments for the operation. E.g., for 'load', {'filename': 'data.csv'}. For 'merge', {'left': 'df1', 'right': 'df2', 'on': 'id_column'}.")
-    result_df: str = Field(description="The name to assign to the resulting DataFrame.")
-
-class ExecutionPlan(BaseModel):
-    """A step-by-step plan of pandas operations to answer a query."""
-    reasoning: str = Field(description="A brief explanation of the plan's logic.")
-    steps: List[PandasOperation] = Field(description="The sequence of pandas operations to execute.")
-
-# --- NEW: Updated Graph State for the new workflow ---
-
-class FileQueryState(TypedDict):
-    """Represents the state of our file query agent graph."""
-    prompt: str
-    file_schema_summary: str
-    execution_plan: Optional[ExecutionPlan]
-    # This will hold the final DataFrame before formatting
-    final_dataframe: Optional[pd.DataFrame] 
-    structured_output: Dict[str, Any]
-    error_message: Optional[str]
-
-# --- NEW: The Refactored Agent Class ---
+            return {"error": f"Failed to query database: {str(e)}"}
 
 class FlatFileQueryAgent:
     """
-    An agent that queries a collection of interrelated flat files (CSV, TSV, Excel).
+    Agent focused purely on querying flat files (CSV, TSV, Excel, JSON).
     """
+    
     def __init__(
         self,
         model: str = "gemini-2.5-pro",
         model_provider: str = "google_genai",
         temperature: float = 0.7,
-        api_key: Optional[str] = None,
-        database_directory: str = "./Databases",
-        database_descriptions: Optional[Dict[str, str]] = None
+        api_key: Optional[str] = None
     ):
-        """
-        Initialize the Flat File Query Agent.
-        
-        Args:
-            model: Model name to use
-            model_provider: Provider for the model
-            temperature: Temperature setting for response generation
-            api_key: API key (if None, will try to get from environment)
-            database_directory: Directory containing database files
-            database_descriptions: Dictionary mapping database file names to descriptions
-        """
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
-        self.database_directory = database_directory
-        self.database_descriptions = database_descriptions or {}
         
         if not self.api_key:
-            raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
+            raise ValueError("API key is required.")
         
-        # Initialize the LLM
         try:
             self.llm = init_chat_model(
                 model=self.model,
@@ -926,150 +809,110 @@ class FlatFileQueryAgent:
             )
         except Exception as e:
             raise ValueError(f"Failed to initialize LLM: {e}")
-        
-        
-        self.app = self._build_graph()
 
-    def _build_graph(self):
-        """Builds the LangGraph workflow for file querying."""
-        workflow = StateGraph(FileQueryState)
+    def _analyze_file_directory(self, directory_path: str) -> str:
+        """Analyze all files in a directory and return schema summary."""
+        file_extensions = ['*.csv', '*.tsv', '*.xlsx', '*.json']
+        all_files = []
         
-        # New nodes for the flat file workflow
-        workflow.add_node("analyze_files_node", self.analyze_files_node)
-        workflow.add_node("generate_plan_node", self.generate_plan_node)
-        workflow.add_node("execute_plan_node", self.execute_plan_node)
-        workflow.add_node("format_results_node", self.format_results_node)
+        for ext in file_extensions:
+            pattern = os.path.join(directory_path, ext)
+            all_files.extend(glob.glob(pattern))
         
-        workflow.set_entry_point("analyze_files_node")
-        workflow.add_edge("analyze_files_node", "generate_plan_node")
-        workflow.add_edge("generate_plan_node", "execute_plan_node")
-        workflow.add_edge("execute_plan_node", "format_results_node")
-        workflow.add_edge("format_results_node", END)
+        if not all_files:
+            return "No data files found in the directory."
         
-        return workflow.compile()
+        schema_details = ["## Available Files and their Schemas:"]
+        file_columns = {}
+        
+        # Analyze each file
+        for file_path in all_files:
+            filename = os.path.basename(file_path)
+            try:
+                # Read the file
+                if filename.endswith('.xlsx'):
+                    df = pd.read_excel(file_path)
+                elif filename.endswith('.json'):
+                    df = pd.read_json(file_path)
+                else:
+                    sep = '\t' if filename.endswith('.tsv') else ','
+                    df = pd.read_csv(file_path, sep=sep)
+                
+                # Get file info
+                with io.StringIO() as buffer, redirect_stdout(buffer):
+                    df.info()
+                    info_string = buffer.getvalue()
+                
+                schema_details.append(f"\n### File: `{filename}`")
+                schema_details.append(f"``````")
+                
+                file_columns[filename] = df.columns.tolist()
+                
+            except Exception as e:
+                schema_details.append(f"\n- Could not analyze {filename}. Error: {e}")
+        
+        # Analyze relationships
+        column_to_files = defaultdict(list)
+        for filename, columns in file_columns.items():
+            for column in columns:
+                column_to_files[column].append(filename)
+        
+        relationship_summary = ["\n## Potential Relationships:"]
+        found_relationships = False
+        for column, files in column_to_files.items():
+            if len(files) > 1:
+                relationship_summary.append(f"- **Column `{column}`** found in: `{', '.join(files)}`")
+                found_relationships = True
+        
+        if not found_relationships:
+            relationship_summary.append("- No obvious relationships found.")
+        
+        return "\n".join(schema_details + relationship_summary)
 
-    
-    def analyze_files_node(self, state: FileQueryState) -> Dict[str, Any]:
+    def query_files(self, directory_path: str, user_query: str) -> Dict[str, Any]:
         """
-        Discovers files, analyzes their full schema (including data types) using df.info(),
-        and infers potential relationships based on common column names.
+        Query flat files in the specified directory.
         """
-        # logger.info("--- ANALYZING FILE SCHEMAS & RELATIONSHIPS ---")
         try:
-            file_extensions = ['*.csv', '*.tsv', '*.xlsx', '*.json']
-            all_files = []
-            for ext in file_extensions:
-                all_files.extend(glob.glob(os.path.join(self.file_directory, '**', ext), recursive=True))
-
-            if not all_files:
-                return {"error_message": "No data files (CSV, TSV, Excel, JSON) found."}
-
-            schema_details = ["## Available Tables (Files) and their Schemas:"]
-            # This dictionary will hold {filename: [col1, col2]} for relationship analysis
-            file_columns = {} 
-
-            # 1. First Pass: Get the detailed schema for each file
-            for file_path in all_files:
-                filename = os.path.basename(file_path)
-                try:
-                    # Read the full file to get accurate type info
-                    if filename.endswith('.xlsx'):
-                        df = pd.read_excel(file_path)
-                    elif filename.endswith('.json'):
-                        df = pd.read_json(file_path)
-                    else:
-                        sep = '\t' if filename.endswith('.tsv') else ','
-                        df = pd.read_csv(file_path, sep=sep)
-                    
-                    # Capture the output of df.info() as a string
-                    with io.StringIO() as buffer, redirect_stdout(buffer):
-                        df.info()
-                        info_string = buffer.getvalue()
-                    
-                    schema_details.append(f"\n### File: `{filename}`")
-                    schema_details.append(f"```\n{info_string}\n```")
-
-                    # Store columns for the next step
-                    file_columns[filename] = df.columns.tolist()
-
-                except Exception as e:
-                    schema_details.append(f"\n- Could not analyze {filename}. Error: {e}")
-
-            # 2. Second Pass: Analyze columns to infer relationships
-            column_to_files = defaultdict(list)
-            for filename, columns in file_columns.items():
-                for column in columns:
-                    # Group files by the columns they contain
-                    column_to_files[column].append(filename)
+            # Analyze file schemas
+            schema_summary = self._analyze_file_directory(directory_path)
             
-            relationship_summary = ["\n## Inferred Relationships (Potential Join Keys):"]
-            found_relationships = False
-            for column, files in column_to_files.items():
-                # If a column name appears in more than one file, it's a potential key
-                if len(files) > 1:
-                    relationship_summary.append(f"- **Column `{column}`** is a potential key, found in: `{', '.join(files)}`")
-                    found_relationships = True
+            if "No data files found" in schema_summary:
+                return {"error": "No data files found in the directory"}
             
-            if not found_relationships:
-                relationship_summary.append("- No obvious relationships were found based on common column names.")
-
-            # 3. Combine all details into the final summary string
-            final_summary = "\n".join(schema_details + relationship_summary)
+            # Generate execution plan
+            prompt_template = ChatPromptTemplate.from_messages([
+                ("system",
+                 f"""You are a data analysis expert. Create a step-by-step pandas execution plan.
+                 
+                 Available Operations:
+                 - `load`: Load file. args: {{"filename": "file.csv"}}
+                 - `merge`: Join DataFrames. args: {{"left": "df1", "right": "df2", "on": "column", "how": "inner"}}
+                 - `filter`: Filter rows. args: {{"df_name": "df1", "query_string": "column > 100"}}
+                 - `groupby`: Group and aggregate. args: {{"df_name": "df1", "by": ["col1"], "agg": {{"col2": "sum"}}}}
+                 - `select`: Select columns. args: {{"df_name": "df1", "columns": ["col1", "col2"]}}
+                 
+                 File Schemas:
+                 {schema_summary}"""),
+                ("user", "Question: {query}")
+            ])
             
-            return {"file_schema_summary": final_summary}
+            planner = prompt_template | self.llm.with_structured_output(ExecutionPlan)
+            plan = planner.invoke({"query": user_query, "schema_summary": schema_summary})
             
-        except Exception as e:
-            return {"error_message": f"Failed during file analysis: {e}"}
-
-    def generate_plan_node(self, state: FileQueryState) -> Dict[str, Any]:
-        """Generates a step-by-step pandas execution plan."""
-        # logger.info("--- GENERATING EXECUTION PLAN ---")
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system",
-             """You are a data analysis expert. Your task is to create a step-by-step execution plan using pandas operations to answer a user's question based on the available files.
-             
-             Available Operations:
-             - `load`: Loads a file into a DataFrame. args: {"filename": "file.csv"}
-             - `merge`: Joins two DataFrames. args: {"left": "df1_name", "right": "df2_name", "on": "common_column", "how": "inner/left/right"}
-             - `filter`: Filters rows in a DataFrame. args: {"df_name": "df_to_filter", "query_string": "column_name > 100"}
-             - `groupby`: Groups data and performs an aggregation. args: {"df_name": "df_to_group", "by": ["col1", "col2"], "agg": {"col_to_agg": "sum/mean/count"}}
-             - `select`: Selects specific columns. args: {"df_name": "df_to_select", "columns": ["col1", "col2"]}
-             
-             Analyze the user's prompt and the available file schemas to create the plan. Infer the join keys based on column names.
-             
-             File Schemas:
-             {file_schema}"""),
-            ("user", "Question: {prompt}")
-        ])
-        
-        planner = prompt_template | self.llm.with_structured_output(ExecutionPlan)
-        plan = planner.invoke({
-            "prompt": state['prompt'],
-            "file_schema": state['file_schema_summary']
-        })
-        return {"execution_plan": plan}
-
-    def execute_plan_node(self, state: FileQueryState) -> Dict[str, Any]:
-        """Executes the pandas plan, now with JSON loading capability."""
-        # logger.info("--- EXECUTING PLAN ---")
-        plan = state.get("execution_plan")
-        if not plan:
-            return {"error_message": "No execution plan found."}
+            # Execute the plan
+            dataframes = {}
+            final_df_name = ""
             
-        dataframes = {} # To store in-memory dataframes
-        final_df_name = ""
-
-        try:
             for step in plan.steps:
                 op = step.operation.lower()
                 args = step.args
                 final_df_name = step.result_df
-
+                
                 if op == 'load':
-                    file_path = os.path.join(self.file_directory, args['filename'])
+                    file_path = os.path.join(directory_path, args['filename'])
                     if file_path.endswith('.xlsx'):
                         dataframes[step.result_df] = pd.read_excel(file_path)
-                    # NEW: Add a condition to load JSON files into a DataFrame
                     elif file_path.endswith('.json'):
                         dataframes[step.result_df] = pd.read_json(file_path)
                     else:
@@ -1088,36 +931,102 @@ class FlatFileQueryAgent:
                 elif op == 'select':
                     df = dataframes[args['df_name']]
                     dataframes[step.result_df] = df[args['columns']]
-                else:
-                    return {"error_message": f"Unknown operation: {op}"}
-
+            
             final_df = dataframes.get(final_df_name)
-            return {"final_dataframe": final_df}
-
+            if final_df is None or final_df.empty:
+                return {"message": "The query resulted in no data"}
+            
+            # Format results
+            results_json = final_df.head(20).to_dict('records')
+            
+            return {
+                "summary": f"Successfully processed {len(final_df)} records",
+                "total_records": len(final_df),
+                "execution_plan": plan.reasoning,
+                "raw_data": results_json
+            }
+            
         except Exception as e:
-            return {"error_message": f"Failed during plan execution: {e}"}
+            return {"error": f"Failed to query files: {str(e)}"}
 
-    def format_results_node(self, state: FileQueryState) -> Dict[str, Any]:
-        """Formats the final DataFrame into a structured output."""
-        # logger.info("--- FORMATTING RESULTS ---")
-        if state.get("error_message"):
-            return {"structured_output": {"error": state["error_message"]}}
+
+class DatabaseQueryOrchestrator:
+    """
+    Orchestrator that coordinates between the three agents.
+    """
+    
+    def __init__(
+        self,
+        model: str = "gemini-2.5-pro",
+        model_provider: str = "google_genai",
+        temperature: float = 0.7,
+        api_key: Optional[str] = None,
+        database_directory: str = "./Databases"
+    ):
+        # Initialize all three agents
+        self.discovery_agent = DatabaseDiscoveryAgent(
+            model=model,
+            model_provider=model_provider,
+            temperature=temperature,
+            api_key=api_key,
+            database_directory=database_directory
+        )
         
-        final_df = state.get("final_dataframe")
-        if final_df is None or final_df.empty:
-            return {"structured_output": {"message": "The query resulted in no data."}}
-
-        # Convert DataFrame to a list of dictionaries for JSON compatibility
-        results_json = final_df.head(20).to_json(orient="records")
-
-        return {"structured_output": json.loads(results_json)}
-
-    def run(self, prompt: str) -> Dict[str, Any]:
-        """The main entry point to run the agent."""
-        inputs = {"prompt": prompt}
-        final_state = self.app.invoke(inputs)
-
-    def run_and_stream_watch(self, prompt: str):
+        self.sql_agent = SQLQueryAgent(
+            model=model,
+            model_provider=model_provider,
+            temperature=temperature,
+            api_key=api_key
+        )
+        
+        self.flatfile_agent = FlatFileQueryAgent(
+            model=model,
+            model_provider=model_provider,
+            temperature=temperature,
+            api_key=api_key
+        )
+    
+    def query(self, user_query: str) -> Dict[str, Any]:
+        """
+        Main entry point that orchestrates the three agents.
+        """
+        try:
+            # Step 1: Discover the best database
+            discovery_result = self.discovery_agent.select_best_database(user_query)
+            
+            if "error" in discovery_result:
+                return discovery_result
+            
+            database_info = discovery_result["database_info"]
+            recommended_agent = discovery_result["recommended_agent"]
+            
+            # Step 2: Route to appropriate agent
+            if recommended_agent == "SQL_Agent":
+                result = self.sql_agent.query_database(
+                    database_info["file_path"], 
+                    user_query
+                )
+            else:  # FlatFile_Agent
+                result = self.flatfile_agent.query_files(
+                    database_info["directory"], 
+                    user_query
+                )
+            
+            # Add discovery metadata to the result
+            result["discovery_info"] = {
+                "selected_database": database_info["name"],
+                "database_type": database_info["type"],
+                "reasoning": discovery_result["reasoning"],
+                "confidence": discovery_result["confidence_score"]
+            }
+            
+            return result
+            
+        except Exception as e:
+            return {"error": f"Orchestration failed: {str(e)}"}
+        
+    
+    def run_and_stream_watch(self, prompt: str) -> Dict[str, Any]:
         """
         The main entry point to run the agent.
         This method now streams the output of each node to the console.
@@ -1125,15 +1034,534 @@ class FlatFileQueryAgent:
         inputs = {"prompt": prompt}
         final_state = {}
 
-        # Use app.stream() to see the output of each node
         print("--- 🚀 Starting Agent Run ---")
-        for output in self.app.stream(inputs, {"recursion_limit": 10}):
-            for key, value in output.items():
-                print(f"\n--- ✅ Output from node: {key} ---")
-                # Pretty print the dictionary to see the state at each step
-                print(json.dumps(value, indent=2, ensure_ascii=False))
-                final_state = value # The last value holds the final state
+        
+        try:
+            # Step 1: Discovery Agent Node
+            print(f"\n--- ✅ Output from node: discovery_agent ---")
+            discovery_result = self.discovery_agent.select_best_database(prompt)
+            print(json.dumps(discovery_result, indent=2, ensure_ascii=False))
+            final_state.update(discovery_result)
+            
+            if "error" in discovery_result:
+                print("\n--- 🏁 Agent Finished (with error) ---")
+                return {"error": discovery_result["error"]}
+            
+            database_info = discovery_result["database_info"]
+            recommended_agent = discovery_result["recommended_agent"]
+            
+            # Step 2: Query Execution Agent Node
+            agent_node_name = recommended_agent.lower().replace("_agent", "_node")
+            print(f"\n--- ✅ Output from node: {agent_node_name} ---")
+            
+            if recommended_agent == "SQL_Agent":
+                query_result = self.sql_agent.query_database(
+                    database_info["file_path"], 
+                    prompt
+                )
+            else:  # FlatFile_Agent
+                query_result = self.flatfile_agent.query_files(
+                    database_info["directory"], 
+                    prompt
+                )
+            
+            print(json.dumps(query_result, indent=2, ensure_ascii=False))
+            final_state.update(query_result)
+            
+            # Step 3: Final Assembly Node
+            print(f"\n--- ✅ Output from node: assembly_node ---")
+            
+            # Add discovery metadata to the result
+            final_result = query_result.copy()
+            final_result["discovery_info"] = {
+                "selected_database": database_info["name"],
+                "database_type": database_info["type"],
+                "reasoning": discovery_result["reasoning"],
+                "confidence": discovery_result["confidence_score"]
+            }
+            
+            # Create structured output
+            structured_output = {
+                "structured_output": {
+                    "status": "success",
+                    "query": prompt,
+                    "selected_database": database_info["name"],
+                    "database_type": database_info["type"],
+                    "agent_used": recommended_agent,
+                    "summary": final_result.get("summary", "Query completed"),
+                    "total_records": final_result.get("total_records", 0),
+                    "key_findings": final_result.get("key_findings", []),
+                    "execution_details": {
+                        "sql_query_used": final_result.get("sql_query_used"),
+                        "execution_plan": final_result.get("execution_plan"),
+                        "confidence_score": discovery_result["confidence_score"]
+                    },
+                    "raw_data": final_result.get("raw_data", [])
+                }
+            }
+            
+            print(json.dumps(structured_output, indent=2, ensure_ascii=False))
+            final_state.update(structured_output)
+            
+            print("\n--- 🏁 Agent Finished ---")
+            return final_state.get('structured_output', {"error": "Agent failed to produce a structured output."})
+            
+        except Exception as e:
+            error_output = {"error": f"Orchestration failed: {str(e)}"}
+            print(f"\n--- ❌ Error in orchestration ---")
+            print(json.dumps(error_output, indent=2, ensure_ascii=False))
+            print("\n--- 🏁 Agent Finished (with error) ---")
+            return error_output
 
-        print("\n--- 🏁 Agent Finished ---")
-        return final_state.get('structured_output', {"error": "Agent failed to produce a structured output."})
+
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Dict, Any, Optional, Union
+from sentence_transformers import SentenceTransformer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+import faiss
+
+import numpy as np
+import pickle
+
+
+class KnowledgeEntry(BaseModel):
+    """Structure for knowledge entries with validation"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    content: str = Field(..., min_length=1, description="Knowledge content")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Associated metadata")
+    embedding: Optional[np.ndarray] = Field(default=None, description="Vector embedding")
+    
+    def model_dump_for_storage(self) -> Dict[str, Any]:
+        """Custom serialization excluding numpy arrays"""
+        data = self.model_dump(exclude={'embedding'})
+        return data
+
+class QueryResult(BaseModel):
+    """Structure for query results with validation"""
+    query: str = Field(..., min_length=1, description="Original search query")
+    similar_contexts: List[Dict[str, Any]] = Field(default_factory=list, description="Retrieved contexts")
+    total_results: int = Field(ge=0, description="Number of results found")
+    similarity_scores: List[float] = Field(
+        default_factory=list, 
+        description="Similarity scores for results"
+    )
+    retrieved_knowledge: str = Field(default="", description="Combined knowledge text")
+    
+    @field_validator('similarity_scores')
+    @classmethod
+    def validate_similarity_scores(cls, v, info):
+        """Ensure similarity scores are between 0 and 1"""
+        if any(score < 0 or score > 1 for score in v):
+            raise ValueError("Similarity scores must be between 0 and 1")
+        return v
+    
+    @field_validator('total_results')
+    @classmethod
+    def validate_total_results(cls, v, info):
+        """Ensure total_results matches similar_contexts length"""
+        similar_contexts = info.data.get('similar_contexts', [])
+        if len(similar_contexts) != v:
+            raise ValueError("total_results must match length of similar_contexts")
+        return v
+
+class KnowledgeStats(BaseModel):
+    """Statistics about the knowledge base"""
+    total_entries: int = Field(ge=0, description="Total knowledge entries")
+    categories: Dict[str, int] = Field(default_factory=dict, description="Categories breakdown")
+    avg_content_length: float = Field(ge=0, description="Average content length")
+    index_size: int = Field(ge=0, description="Faiss index size")
+    last_updated: Optional[str] = Field(default=None, description="Last update timestamp")
+
+class ContextualPromptResult(BaseModel):
+    """Result from contextual prompt generation"""
+    original_query: str = Field(..., description="Original user query")
+    task_type: str = Field(default="general", description="Type of task")
+    optimized_prompt: str = Field(..., description="Generated optimized prompt")
+    context_summary: str = Field(..., description="Summary of context used")
+    task_instructions: List[str] = Field(default_factory=list, description="Task-specific instructions")
+    confidence_score: float = Field(ge=0, le=1, description="Confidence in context relevance")
+    contexts_used: List[Dict[str, Any]] = Field(default_factory=list, description="Contexts that were used")
+    knowledge_retrieved: str = Field(default="", description="Raw knowledge retrieved")
+    
+    @field_validator('confidence_score')
+    @classmethod
+    def validate_confidence(cls, v):
+        """Ensure confidence score is between 0 and 1"""
+        if not 0 <= v <= 1:
+            raise ValueError("Confidence score must be between 0 and 1")
+        return v
+
+
+
+class VectorKnowledgeAgent:
+    """
+    Agent for managing and querying a Faiss-based vector knowledge database.
+    """
+    
+    def __init__(
+        self,
+        model: str = "gemini-2.5-pro",
+        model_provider: str = "google_genai", 
+        embedding_model: str = "sentence-transformers/all-mpnet-base-v2",
+        temperature: float = 0.7,
+        api_key: Optional[str] = None,
+        index_path: Optional[str] = "./knowledge_base"
+    ):
+        self.model = model
+        self.model_provider = model_provider
+        self.temperature = temperature
+        self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.index_path = index_path
+        
+        # Initialize embedding model
+        try:
+            self.embedding_model = SentenceTransformer(embedding_model)
+            self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
+        except Exception as e:
+            raise ValueError(f"Failed to initialize embedding model: {e}")
+        
+        # Initialize LLM
+        if not self.api_key:
+            raise ValueError("API key is required.")
+            
+        try:
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to initialize LLM: {e}")
+        
+        # Initialize Faiss index
+        self.index = None
+        self.knowledge_store = []
+        self.metadata_store = []
+        
+        # Load existing index if available
+        self._load_or_create_index()
+    
+    def _load_or_create_index(self):
+        """Load existing index or create a new one"""
+        try:
+            if os.path.exists(f"{self.index_path}.index"):
+                self.index = faiss.read_index(f"{self.index_path}.index")
+                
+                # Load metadata
+                with open(f"{self.index_path}_metadata.pkl", 'rb') as f:
+                    self.metadata_store = pickle.load(f)
+                    
+                # Load knowledge store
+                with open(f"{self.index_path}_knowledge.pkl", 'rb') as f:
+                    self.knowledge_store = pickle.load(f)
+                    
+                logger.info(f"Loaded existing index with {self.index.ntotal} vectors")
+            else:
+                # Create new index
+                self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner Product for cosine similarity
+                self.index = faiss.IndexIDMap(self.index)
+                logger.info("Created new Faiss index")
+                
+        except Exception as e:
+            logger.error(f"Error loading/creating index: {e}")
+            self.index = faiss.IndexFlatIP(self.embedding_dim)
+            self.index = faiss.IndexIDMap(self.index)
+    
+    def add_knowledge(
+        self, 
+        content: Union[str, List[str]], 
+        metadata: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Add knowledge to the vector database
+        """
+        try:
+            # Handle single string input
+            if isinstance(content, str):
+                content = [content]
+                metadata = [metadata] if metadata else [{}]
+            
+            # Handle metadata
+            if metadata is None:
+                metadata = [{}] * len(content)
+            elif isinstance(metadata, dict):
+                metadata = [metadata] * len(content)
+            
+            # Text splitting for large documents
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap
+            )
+            
+            all_chunks = []
+            all_metadata = []
+            
+            for i, doc_content in enumerate(content):
+                chunks = text_splitter.split_text(doc_content)
+                
+                for j, chunk in enumerate(chunks):
+                    chunk_metadata = metadata[i].copy()
+                    chunk_metadata.update({
+                        'doc_index': i,
+                        'chunk_index': j,
+                        'total_chunks': len(chunks),
+                        'char_count': len(chunk)
+                    })
+                    
+                    all_chunks.append(chunk)
+                    all_metadata.append(chunk_metadata)
+            
+            # Generate embeddings
+            embeddings = self.embedding_model.encode(all_chunks, convert_to_numpy=True)
+            
+            # Normalize embeddings for cosine similarity
+            faiss.normalize_L2(embeddings)
+            
+            # Add to index
+            start_id = len(self.knowledge_store)
+            ids = np.array(range(start_id, start_id + len(all_chunks)))
+            
+            self.index.add_with_ids(embeddings.astype('float32'), ids)
+            
+            # Store knowledge and metadata
+            for i, (chunk, meta) in enumerate(zip(all_chunks, all_metadata)):
+                knowledge_entry = KnowledgeEntry(
+                    content=chunk,
+                    metadata=meta,
+                    embedding=embeddings[i]
+                )
+                self.knowledge_store.append(knowledge_entry)
+                self.metadata_store.append(meta)
+            
+            # Save index
+            self.save_index()
+            
+            return {
+                "status": "success",
+                "chunks_added": len(all_chunks),
+                "total_knowledge_entries": len(self.knowledge_store)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error adding knowledge: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def query_knowledge(
+        self, 
+        query: str, 
+        k: int = 5,
+        min_similarity: float = 0.3,
+        filter_metadata: Optional[Dict[str, Any]] = None
+    ) -> QueryResult:
+        """
+        Query the knowledge database for relevant context
+        """
+        try:
+            if self.index.ntotal == 0:
+                return QueryResult(
+                    query=query,
+                    similar_contexts=[],
+                    total_results=0,
+                    similarity_scores=[],
+                    retrieved_knowledge="No knowledge available in the database."
+                )
+            
+            # Generate query embedding
+            query_embedding = self.embedding_model.encode([query], convert_to_numpy=True)
+            faiss.normalize_L2(query_embedding)
+            
+            # Search the index
+            similarities, indices = self.index.search(query_embedding.astype('float32'), k)
+            
+            # Filter results
+            similar_contexts = []
+            filtered_similarities = []
+            
+            for i, (similarity, idx) in enumerate(zip(similarities[0], indices[0])):
+                if idx == -1 or similarity < min_similarity:
+                    continue
+                    
+                knowledge_entry = self.knowledge_store[idx]
+                
+                # Apply metadata filter if provided
+                if filter_metadata:
+                    if not all(knowledge_entry.metadata.get(k) == v for k, v in filter_metadata.items()):
+                        continue
+                
+                context_info = {
+                    'content': knowledge_entry.content,
+                    'metadata': knowledge_entry.metadata,
+                    'similarity_score': float(similarity),
+                    'index': int(idx)
+                }
+                
+                similar_contexts.append(context_info)
+                filtered_similarities.append(float(similarity))
+            
+            # Combine retrieved knowledge
+            retrieved_knowledge = "\n\n".join([ctx['content'] for ctx in similar_contexts])
+            
+            return QueryResult(
+                query=query,
+                similar_contexts=similar_contexts,
+                total_results=len(similar_contexts),
+                similarity_scores=filtered_similarities,
+                retrieved_knowledge=retrieved_knowledge
+            )
+            
+        except Exception as e:
+            logger.error(f"Error querying knowledge: {e}")
+            return QueryResult(
+                query=query,
+                similar_contexts=[],
+                total_results=0,
+                similarity_scores=[],
+                retrieved_knowledge=f"Error querying knowledge: {str(e)}"
+            )
+    
+    def generate_contextual_prompt(
+        self,
+        user_query: str,
+        task_type: str = "general",
+        context_limit: int = 3,
+        category: Optional[str] = None,
+        include_metadata: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Generate a contextual prompt using retrieved knowledge
+        """
+        # try:
+        # Query for relevant context
+        knowledge_result = self.query_knowledge(user_query, k=context_limit)
+        
+        # Build context section
+        context_sections = []
+        for i, ctx in enumerate(knowledge_result.similar_contexts, 1):
+            context_section = f"Context {i} (Similarity: {ctx['similarity_score']:.3f}):\n{ctx['content']}"
+            
+            if include_metadata and ctx['metadata']:
+                relevant_metadata = {k: str(v).replace('{', '{{').replace('}', '}}') 
+                                for k, v in ctx['metadata'].items() 
+                                if k not in ['doc_index', 'chunk_index']}
+                if relevant_metadata:
+                    metadata_str = json.dumps(relevant_metadata, indent=2)
+                    context_section += f"\nMetadata: {metadata_str}"
+            
+            context_sections.append(context_section)
+        
+        context_text = "\n\n" + "="*50 + "\n\n".join(context_sections) if context_sections else "\n\nNo relevant context found in knowledge base."
+        
+        # Debug: Print context_text to inspect
+        print("Context Text:", context_text)
+        
+        # Generate enhanced prompt using LLM
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", 
+            """You are an expert prompt engineer. Given a user query, task type, and relevant context from a knowledge base, create an optimized prompt that:
+            
+            1. Incorporates the most relevant context
+            2. Is tailored for the specific task type: {{task_type}}
+            3. Provides clear instructions
+            4. Maintains context relevance
+            
+            Available Context:
+            {context_text}
+            
+            Task Type: {{task_type}}
+            Original Query: {{user_query}}
+            Category: {{category}}
+            
+            Generate a well-structured prompt that an AI agent can use effectively."""),
+            ("user", "Generate an optimized prompt for this query and context.")
+        ])
+        
+        # Use structured output for the prompt generation
+        class OptimizedPrompt(BaseModel):
+            enhanced_prompt: str = Field(description="The optimized prompt incorporating context")
+            context_summary: str = Field(description="Summary of key context used")
+            task_instructions: List[str] = Field(description="Specific instructions for the task")
+            confidence_score: float = Field(description="Confidence in context relevance (0-1)")
+        
+        prompt_generator = prompt_template | self.llm.with_structured_output(OptimizedPrompt)
+        optimized_prompt = prompt_generator.invoke({
+            "user_query": user_query,
+            "category":category if category else "uncategorized",
+            "task_type": task_type,
+            "context_text": context_text
+        })
+        
+        return {
+            "original_query": user_query,
+            "task_type": task_type,
+            "optimized_prompt": optimized_prompt.enhanced_prompt,
+            "context_summary": optimized_prompt.context_summary,
+            "task_instructions": optimized_prompt.task_instructions,
+            "confidence_score": optimized_prompt.confidence_score,
+            "contexts_used": knowledge_result.similar_contexts,
+            "knowledge_retrieved": knowledge_result.retrieved_knowledge
+        }
+            
+        # except Exception as e:
+        #     logger.error(f"Error generating contextual prompt: {e}")
+        #     return {
+        #         "original_query": user_query,
+        #         "task_type": task_type,
+        #         "category": category if category else "uncategorized",
+        #         "optimized_prompt": f"Error generating contextual prompt: {str(e)}",
+        #         "context_summary": "No context available due to error",
+        #         "task_instructions": [],
+        #         "confidence_score": 0.0,
+        #         "contexts_used": [],
+        #         "knowledge_retrieved": ""
+        #     }
+            
+    
+    def save_index(self):
+        """Save the current index and metadata to disk"""
+        try:
+            os.makedirs(os.path.dirname(self.index_path) if os.path.dirname(self.index_path) else '.', exist_ok=True)
+            
+            faiss.write_index(self.index, f"{self.index_path}.index")
+            
+            with open(f"{self.index_path}_metadata.pkl", 'wb') as f:
+                pickle.dump(self.metadata_store, f)
+                
+            with open(f"{self.index_path}_knowledge.pkl", 'wb') as f:
+                pickle.dump(self.knowledge_store, f)
+                
+            logger.info("Index saved successfully")
+            
+        except Exception as e:
+            logger.error(f"Error saving index: {e}")
+    
+    def get_knowledge_stats(self) -> Dict[str, Any]:
+        """Get statistics about the knowledge base"""
+        try:
+            total_entries = len(self.knowledge_store)
+            if total_entries == 0:
+                return {"total_entries": 0, "categories": {}, "avg_content_length": 0}
+            
+            categories = {}
+            total_length = 0
+            
+            for entry in self.knowledge_store:
+                total_length += len(entry.content)
+                category = entry.metadata.get('category', 'uncategorized')
+                categories[category] = categories.get(category, 0) + 1
+            
+            return {
+                "total_entries": total_entries,
+                "categories": categories,
+                "avg_content_length": total_length / total_entries,
+                "index_size": self.index.ntotal if self.index else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting knowledge stats: {e}")
+            return {"error": str(e)}
 
