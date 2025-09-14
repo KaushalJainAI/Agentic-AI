@@ -1,31 +1,189 @@
-from dotenv import load_dotenv
-from typing import Annotated, Literal, Optional, List, Dict, Any
+from typing import Annotated, Literal, Optional, List, Dict, Any, Union, Callable
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain.chat_models import init_chat_model
-from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
-import os 
+from pydantic import BaseModel, Field
+from langchain.prompts import ChatPromptTemplate
+import os
 import json
-
-from agents import Chatbot, WebScrapingAgent, DatabaseQueryOrchestrator, VectorKnowledgeAgent
-
+import logging
+import sqlite3
 from datetime import datetime
+import uuid
+from collections import defaultdict
+from enum import Enum
 
+# Main Application Launcher for SuperAgent System
+import sys
+import logging
+import asyncio
+import signal
+from threading import Thread
+from dotenv import load_dotenv
 
-
-
+# Load environment variables
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
+# Import your modules
+from config import SuperAgentConfig
+from super_agent_system import SuperAgent, SuperAgentAPI
+from connections import TelegramBot
 
-os.environ["GEMINI_API_KEY"] = api_key
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('superagent.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
-search_key = os.getenv("TAVILY_API_KEY")
+logger = logging.getLogger(__name__)
 
-os.environ["TAVILY_API_KEY"] = search_key
+class SuperAgentLauncher:
+    """Main launcher for the SuperAgent Flask API system"""
+    
+    def __init__(self):
+        self.super_agent = None
+        self.api_server = None
+        self.api_thread = None
+        # self.shutdown_event = Event()
+        
+    def validate_setup(self):
+        """Validate configuration before starting"""
+        logger.info("Validating SuperAgent configuration...")
+        
+        config_status = SuperAgentConfig.validate_config()
+        
+        if not config_status["valid"]:
+            logger.error("Configuration validation failed:")
+            for issue in config_status["issues"]:
+                logger.error(f"  - {issue}")
+            return False
+        
+        logger.info("Configuration validation passed:")
+        for key, value in config_status["config_summary"].items():
+            logger.info(f"  - {key}: {value}")
+        
+        return True
+    
+    def initialize_super_agent(self):
+        """Initialize the SuperAgent with all specialized agents"""
+        logger.info("Initializing SuperAgent system...")
+        
+        try:
+            self.super_agent = SuperAgent(
+                model=SuperAgentConfig.DEFAULT_MODEL,
+                model_provider=SuperAgentConfig.MODEL_PROVIDER,
+                temperature=SuperAgentConfig.TEMPERATURE,
+                api_key=SuperAgentConfig.LLM_API_KEY,
+                tavily_api_key=SuperAgentConfig.TAVILY_API_KEY,
+                database_directory=SuperAgentConfig.DATABASE_DIRECTORY,
+                knowledge_base_path=SuperAgentConfig.KNOWLEDGE_BASE_PATH,
+                memory_db_path=SuperAgentConfig.MEMORY_DB_PATH
+            )
+            
+            logger.info("SuperAgent initialized successfully!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize SuperAgent: {e}")
+            return False
+    
+    def start_api_server(self):
+        """Start the Flask API server"""
+        logger.info("Starting Flask API server...")
+        
+        try:
+            self.api_server = SuperAgentAPI(
+                self.super_agent,
+                host=SuperAgentConfig.API_HOST,
+                port=SuperAgentConfig.API_PORT
+            )
+            
+            logger.info(f"API server started on {SuperAgentConfig.API_HOST}:{SuperAgentConfig.API_PORT}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start API server: {e}")
+            return False
+    
+    def _run_api_server(self):
+        """Internal method to run API server with proper configuration"""
+        try:
+            # Run Flask with threading enabled for production-like behavior
+            self.api_server.run(
+                host=SuperAgentConfig.API_HOST,
+                port=SuperAgentConfig.API_PORT,
+                debug=False,
+                threaded=True,
+                use_reloader=False
+            )
+        except Exception as e:
+            logger.error(f"API server error: {e}")
+            self.shutdown_event.set()
+    
+    def setup_signal_handlers(self):
+        """Setup graceful shutdown handlers"""
+        def signal_handler(signum, frame):
+            logger.info("Shutdown signal received. Cleaning up...")
+            self.shutdown_event.set()
+            self.shutdown()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    
+    def shutdown(self):
+        """Graceful shutdown of all components"""
+        logger.info("Shutting down SuperAgent system...")
+        self.shutdown_event.set()
+        logger.info("SuperAgent system shutdown complete.")
+    
+    def run(self):
+        """Main execution method - runs Flask server directly"""
+        logger.info("🚀 Starting SuperAgent Flask API Server")
+        
+        # Setup signal handlers for graceful shutdown
+        self.setup_signal_handlers()
+        
+        # Step 1: Validate configuration
+        if not self.validate_setup():
+            logger.error("Configuration validation failed. Exiting.")
+            sys.exit(1)
+        
+        # Step 2: Initialize SuperAgent
+        if not self.initialize_super_agent():
+            logger.error("SuperAgent initialization failed. Exiting.")
+            sys.exit(1)
+        
+        # Step 3: Initialize API server
+        if not self.start_api_server():
+            logger.error("API server initialization failed. Exiting.")
+            sys.exit(1)
+        
+        logger.info("🎉 SuperAgent Flask API is ready!")
+        logger.info("=" * 60)
+        logger.info("System Status:")
+        logger.info(f"  ✅ SuperAgent Core: Active")
+        logger.info(f"  ✅ API Server: http://{SuperAgentConfig.API_HOST}:{SuperAgentConfig.API_PORT}")
+        logger.info(f"  ✅ Available Agents: 7 specialized agents")
+        logger.info("=" * 60)
+        logger.info("Starting Flask server...")
+        
+        try:
+            # Run the Flask server directly (blocking call)
+            self._run_api_server()
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal")
+            self.shutdown()
 
-
+# Usage
+if __name__ == "__main__":
+    launcher = SuperAgentLauncher()
+    launcher.run()
 
 
 # if __name__ == "__main__":

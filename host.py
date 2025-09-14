@@ -1,42 +1,39 @@
-from flask import Flask, redirect
-from flask import request
-from flask import jsonify
+from flask import Flask, request, jsonify
 import os
+from agents import Chatbot
+from dotenv import load_dotenv
 
-from main import RemoteLLM
+load_dotenv()
 
-remote_llm = RemoteLLM()
+api_key = os.getenv("GEMINI_API_KEY")
+os.environ["GEMINI_API_KEY"] = api_key
+
+chatbot = Chatbot(api_key=api_key)
 
 app = Flask(__name__)
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def hello_world():
     return "<p>Hello, World!</p>"
 
-@app.route("/callLLM", methods = ["POST", "GET"])
-def call_LLM():
-    res = remote_llm.prompt("Who is the president of the United States?")
-    return f"<p>Calling deepseek! <br> {res} </p>"
-
-@app.route("/automate", methods = ["POST", "GET"])
-def automate():
-    res = remote_llm.prompt("Write a script that could send an email to the recipient")
-    return f"<p>Calling deepseek! <br> {res} </p>"
-
-
-# @app.route("/automate", methods = ["POST", "GET"])
-# def automate():
-#     instruction = "Give the code to message my friend on whatsapp. His name is Anurag Sharma."
-#     executed = remote_llm.CreateAUTOfile(instruction)
-#     if executed:
-#         print("Happy Birthday!")
-#         return "<h1>We have successfully wished your friend!</h1>"        
+@app.route("/chat", methods=["POST"])  # Changed from GET to POST
+def chat():
+    data = request.json
+    user_message = data.get("message", "")
+    user_id = data.get("userId", "")  # Get userId from request
     
-#     return "<h1>The code Broke!</h1>"
-
+    if not user_message:
+        return jsonify({"reply": "No message provided."}), 400
+    
+    try:
+        bot_reply = chatbot.chat(user_message)
+        return jsonify({"reply": bot_reply})
+    except Exception as e:
+        return jsonify({"reply": f"Error: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
+
 
 
 # import os
