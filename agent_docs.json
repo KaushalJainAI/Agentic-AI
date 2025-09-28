@@ -1,0 +1,285 @@
+{
+  "Chatbot": {
+    "description": "A Chatbot uses Google Gemini via LangGraph to conduct natural language conversations. It maintains session state (message history), supports both single-turn and multi-turn chats, allows interactive CLI sessions, and lets users adjust response \"temperature\" (creativity/randomness).",
+    "use_cases": [
+      "Customer support",
+      "Interactive assistants", 
+      "Prototyping"
+    ],
+    "workflow": [
+      "Initialize: Configure model, provider, temperature, and API key",
+      "Build conversation graph",
+      "Chat: Send and receive messages maintaining history",
+      "Interactive session: Multi-turn command-line chat",
+      "Settings update: Adjust model temperature"
+    ],
+    "methods": {
+      "chat": {
+        "description": "Send a single user message; return response.",
+        "parameters": {
+          "message": {"type": "str", "required": true, "description": "The user's message"}
+        }
+      },
+      "chat_with_history": {
+        "description": "Send a list of messages (with role, content keys) for multi-turn chat; return response.",
+        "parameters": {
+          "messages": {"type": "list", "required": true, "description": "List of message dictionaries with 'role' and 'content' keys"}
+        }
+      },
+      "interactive_chat": {
+        "description": "Start an interactive CLI chat session.",
+        "parameters": {}
+      },
+      "update_temperature": {
+        "description": "Update model temperature; return confirmation.",
+        "parameters": {
+          "temperature": {"type": "float", "required": true, "description": "New temperature value"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-flash-lite-preview-06-17",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null
+    }
+  },
+  "WebScrapingAgent": {
+    "description": "Dynamically scrapes web content based on user prompts, extracting structured information. Generates queries, searches URLs, scrapes content, and extracts according to schemas. Supports streaming intermediate results for observability.",
+    "use_cases": [
+      "Market research",
+      "News monitoring",
+      "Data collection from web sources"
+    ],
+    "workflow": [
+      "Initialize with parameters",
+      "Generate search queries",
+      "Scrape URLs for content",
+      "Extract and process information",
+      "Return structured results"
+    ],
+    "methods": {
+      "run": {
+        "description": "Execute full scraping and extraction given a prompt.",
+        "parameters": {
+          "prompt": {"type": "str", "required": true, "description": "User prompt describing what information to scrape"}
+        }
+      },
+      "run_and_stream_watch": {
+        "description": "Stream scraping and extraction process stepwise.",
+        "parameters": {
+          "prompt": {"type": "str", "required": true, "description": "User prompt describing what information to scrape"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null,
+      "tavily_api_key": null
+    }
+  },
+  "DatabaseDiscoveryAgent": {
+    "description": "Finds the most relevant database (SQL or flat file) for a query by scanning directories. Analyzes schema, relevance, and recommends the best database and querying agent type. It can also query these databases and find out the output in case the user wants something from local database. It is highly recommended to select this agent for local database querying",
+    "use_cases": [
+      "Rapid data discovery",
+      "Query routing",
+      "Database cataloging",
+      "controlling other database agents and coordinatoing between them in case of requirement of local database access"
+    ],
+    "workflow": [
+      "Initialize with directory path",
+      "Scan databases and flat files",
+      "Analyze query relevance",
+      "Recommend best database and agent"
+    ],
+    "methods": {
+      "select_best_database": {
+        "description": "Select best-matching database and agent for user query.",
+        "parameters": {
+          "query": {"type": "str", "required": true, "description": "User query to find relevant database for"}
+        }
+      },
+      "_get_all_databases": {
+        "description": "List all available databases and flat files.",
+        "parameters": {}
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null,
+      "database_directory": "./Databases"
+    }
+  },
+  "SQLQueryAgent": {
+    "description": "Executes SQL queries on SQLite databases. Analyzes schema, generates SQL from user prompts, executes queries, and formats results.",
+    "use_cases": [
+      "Automated reporting",
+      "Ad-hoc SQL querying",
+      "Data analytics"
+    ],
+    "workflow": [
+      "Initialize with parameters",
+      "Inspect database schema",
+      "Generate SQL query",
+      "Execute and fetch results",
+      "Format and return results"
+    ],
+    "methods": {
+      "query_database": {
+        "description": "Run SQL query on specified database with user prompt.",
+        "parameters": {
+          "db_path": {"type": "str", "required": true, "description": "Path to the SQLite database file"},
+          "user_query": {"type": "str", "required": true, "description": "User's natural language query"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null
+    }
+  },
+  "FlatFileQueryAgent": {
+    "description": "Queries structured flat files (CSV, TSV, Excel, JSON). Analyzes schema, generates queries, executes data transformations, and returns results.",
+    "use_cases": [
+      "Spreadsheet analysis",
+      "Log processing",
+      "Data preparation"
+    ],
+    "workflow": [
+      "Initialize with parameters",
+      "Analyze files and schemas", 
+      "Generate queries",
+      "Execute data operations",
+      "Return formatted results"
+    ],
+    "methods": {
+      "query_files": {
+        "description": "Run queries on flat files with user prompt.",
+        "parameters": {
+          "directory_path": {"type": "str", "required": true, "description": "Path to directory containing flat files"},
+          "user_query": {"type": "str", "required": true, "description": "User's natural language query"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null
+    }
+  },
+  "VectorKnowledgeAgent": {
+    "description": "An intelligent agent for managing, querying, and augmenting a Faiss-based vector knowledge database. It integrates semantic search, contextual prompt generation, and metadata-aware retrieval for building RAG pipelines.",
+    "capabilities": [
+      "Ingest and chunk large documents",
+      "Generate embeddings using SentenceTransformers",
+      "Store and index knowledge with Faiss",
+      "Perform vector similarity search with cosine normalization",
+      "Apply metadata-based filtering",
+      "Generate optimized contextual prompts via LLM",
+      "Provide statistics and diagnostics about the knowledge base"
+    ],
+    "use_cases": [
+      "Semantic search across knowledge bases",
+      "Contextual augmentation for LLM queries",
+      "Metadata-aware document retrieval",
+      "Prompt optimization for downstream agents",
+      "Knowledge management with persistent storage"
+    ],
+    "workflow": [
+      "Initialize embedding + LLM models",
+      "Load or create Faiss index",
+      "Ingest documents (with chunking and metadata)",
+      "Generate normalized embeddings and update index",
+      "Query knowledge base with similarity + metadata filters",
+      "Retrieve and merge context snippets",
+      "Generate contextual prompt with LLM integration",
+      "Persist index and metadata for reuse",
+      "Get knowledge base statistics"
+    ],
+    "methods": {
+      "add_knowledge": {
+        "description": "Add documents or text to the vector database with optional chunking and metadata.",
+        "parameters": {
+          "content": {"type": "str", "required": true, "description": "Text content to add"},
+          "metadata": {"type": "dict", "required": false, "default": {}, "description": "Optional metadata dictionary"},
+          "chunk_size": {"type": "int", "required": false, "default": 1000, "description": "Size of text chunks"},
+          "chunk_overlap": {"type": "int", "required": false, "default": 200, "description": "Overlap between chunks"}
+        }
+      },
+      "query_knowledge": {
+        "description": "Run similarity search with optional metadata filters to return ranked contextual snippets.",
+        "parameters": {
+          "query": {"type": "str", "required": true, "description": "Search query text"},
+          "top_k": {"type": "int", "required": false, "default": 5, "description": "Number of top results to return"},
+          "metadata_filter": {"type": "dict", "required": false, "default": {}, "description": "Metadata filtering criteria"},
+          "min_score": {"type": "float", "required": false, "default": 0.0, "description": "Minimum similarity score"}
+        }
+      },
+      "generate_contextual_prompt": {
+        "description": "Build an optimized LLM prompt using retrieved knowledge and task-specific instructions.",
+        "parameters": {
+          "query": {"type": "str", "required": true, "description": "User query"},
+          "context_snippets": {"type": "list", "required": true, "description": "Retrieved knowledge snippets"},
+          "task_instructions": {"type": "str", "required": false, "default": "", "description": "Specific task instructions"},
+          "max_context_length": {"type": "int", "required": false, "default": 4000, "description": "Maximum context length"}
+        }
+      },
+      "get_knowledge_stats": {
+        "description": "Return statistics such as total entries, categories, average content length, and index size.",
+        "parameters": {}
+      },
+      "save_index": {
+        "description": "Persist the Faiss index, metadata, and knowledge store to disk.",
+        "parameters": {
+          "path": {"type": "str", "required": false, "default": "./knowledge_base", "description": "Save path for index"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "embedding_model": "sentence-transformers/all-mpnet-base-v2",
+      "temperature": 0.7,
+      "api_key": null,
+      "index_path": "./knowledge_base"
+    }
+  },
+  "DatabaseQueryOrchestrator": {
+    "description": "Orchestrates queries by routing them to discovery, SQL, or flat file agents based on query type and data source. Aggregates and streams results to users.",
+    "use_cases": [
+      "Unified querying for heterogeneous data",
+      "Automated data routing",
+      "Real-time analytics"
+    ],
+    "workflow": [
+      "Initialize parameters and paths",
+      "Discover best database and routing",
+      "Delegate queries to SQL or flat file agents",
+      "Aggregate and format results",
+      "Optionally stream results"
+    ],
+    "methods": {
+      "run_and_stream_watch": {
+        "description": "Execute query with streaming output for user prompt.",
+        "parameters": {
+          "prompt": {"type": "str", "required": true, "description": "User's query prompt"},
+          "recursion_limit": {"type": "int", "required": false, "default": 10, "description": "Maximum recursion limit for streaming"}
+        }
+      }
+    },
+    "parameters": {
+      "model": "gemini-2.5-pro",
+      "model_provider": "google_genai",
+      "temperature": 0.7,
+      "api_key": null,
+      "database_directory": "./Databases"
+    }
+  }
+}

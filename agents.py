@@ -18,6 +18,8 @@ import io
 from collections import defaultdict
 from contextlib import redirect_stdout
 from datetime import datetime
+import ollama
+from langchain_community.chat_models import ChatOllama 
 
 
 load_dotenv()
@@ -148,10 +150,12 @@ class Chatbot:
             try:
                 response = self.chat(user_input)
                 print(f"Bot: {response}")
+                return response
             except Exception as e:
                 print(f"Error: {e}")
                 print("Please try again.")
-    
+                return None
+
     def update_temperature(self, temperature: float):
         """
         Update the temperature setting and rebuild the model.
@@ -167,6 +171,9 @@ class Chatbot:
             api_key=self.api_key
         )
         self.graph = self._build_graph()
+
+        return f"Temperature updated successfully to {temperature}."
+
 
 from tavily import TavilyClient
 
@@ -1204,7 +1211,7 @@ class VectorKnowledgeAgent:
         self,
         model: str = "gemini-2.5-pro",
         model_provider: str = "google_genai", 
-        embedding_model: str = "sentence-transformers/all-mpnet-base-v2",
+        embedding_model: str = "Qwen/Qwen3-Embedding-4B",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
         index_path: Optional[str] = "./knowledge_base"
