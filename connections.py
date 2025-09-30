@@ -26,6 +26,7 @@ class SuperAgentTelegramBot:
         self.application = None
         self._setup_logging()
         self._build_application()
+        self.active_tasks = {}
         
     def _setup_logging(self):
         """Set up logging configuration"""
@@ -121,23 +122,36 @@ class SuperAgentTelegramBot:
         
         self.logger.info(f"Message from user {user_id} (@{username}): {user_message[:100]}...")
         
+        await update.message.reply_text("Working on your request... This may take a moment.")
+
         # Send typing action
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+        task_id = f"{user_id}_{update.message.message_id}"
+
+        task = asyncio.create_task(self._process_and_reply(user_message, chat_id, user_id, username,  task_id))
+        self.active_tasks[task_id] = task
+
+    
+    async def _process_and_reply(self, user_message: str, user_id: int, task_id: int, context: ContextTypes.DEFAULT_TYPE, username: Optional[str] = None):
+        """New async function to handle the API call and reply."""
+
+        username = username or "Unknown"
         
-        try:
-            # Prepare payload for SuperAgent Flask server
-            payload = {
-                "message": user_message,
-                "userId": str(user_id),
-                "username": username
-            }
-            
+        # Prepare payload for SuperAgent Flask server
+        payload = {
+            "message": user_message,
+            "userId": str(user_id),
+            "username": username
+        }
+
+        try:    
             # Send request to Flask server
-            timeout = aiohttp.ClientTimeout(total=15)  # Longer timeout for complex queries
+            timeout = aiohttp.ClientTimeout(total=300)  # Longer timeout for complex queries
             
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    self.backend_url,
+                    self.backend_url.replace('/chat', '/process'),
                     json=payload,
                     headers={'Content-Type': 'application/json'}
                 ) as response:
@@ -187,14 +201,16 @@ class SuperAgentTelegramBot:
             reply = reply[:4000] + "...\n\n📝 _(Message truncated due to length)_"
         
         try:
-            await update.message.reply_text(reply, parse_mode='HTML')
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=reply,
+                parse_mode='HTML'
+            )
         except Exception as e:
-            # Fallback without markdown if parsing fails
-            self.logger.warning(f"Markdown parsing failed, sending plain text: {e}")
-            try:
-                await update.message.reply_text(reply)
-            except Exception as e2:
-                self.logger.error(f"Failed to send reply: {e2}")
+            self.logger.error(f"Failed to send reply to user {user_id}: {e}")
+
+        self.active_tasks.pop(task_id, None)
+
     
     def _get_error_message(self, status_code: int, error_data: dict) -> str:
         """Generate user-friendly error messages based on status code"""
