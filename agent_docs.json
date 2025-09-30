@@ -77,7 +77,8 @@
       "model_provider": "google_genai",
       "temperature": 0.7,
       "api_key": null,
-      "tavily_api_key": null
+      "tavily_api_key": null,
+      "web_search_limit": 5
     }
   },
   "DatabaseDiscoveryAgent": {
