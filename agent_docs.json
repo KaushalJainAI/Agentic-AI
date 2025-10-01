@@ -82,18 +82,20 @@
     }
   },
   "DatabaseDiscoveryAgent": {
-    "description": "Finds the most relevant database (SQL or flat file) for a query by scanning directories. Analyzes schema, relevance, and recommends the best database and querying agent type. It can also query these databases and find out the output in case the user wants something from local database. It is highly recommended to select this agent for local database querying",
+    "description": "Finds the most relevant database (SQL or flat file) agent for a query by scanning directories. Analyzes schema, relevance, and recommends the best database and querying agent type. It can also query these databases and find out the output in case the user wants something from local database. It is highly recommended to select this agent for local database querying",
     "use_cases": [
       "Rapid data discovery",
       "Query routing",
       "Database cataloging",
-      "controlling other database agents and coordinatoing between them in case of requirement of local database access"
+      "controlling other database agents and coordinatoing between them in case of requirement of local database access",
+      "Querying from local databases"
     ],
     "workflow": [
       "Initialize with directory path",
       "Scan databases and flat files",
       "Analyze query relevance",
-      "Recommend best database and agent"
+      "Recommend best database and agent",
+      "call relevant agent that will answer the query"
     ],
     "methods": {
       "select_best_database": {

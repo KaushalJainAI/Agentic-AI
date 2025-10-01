@@ -8,7 +8,7 @@ from typing import Dict, Any
 from langgraph_super_agent import SuperAgentOrchestrator
 from agents import (
     Chatbot, WebScrapingAgent, DatabaseQueryOrchestrator, 
-    SQLQueryAgent
+    VectorKnowledgeAgent
 )
 
 # Configure logging
@@ -38,6 +38,7 @@ class SuperAgentFlaskApp:
                 "Chatbot": Chatbot(), 
                 "DatabaseOrchestrator": DatabaseQueryOrchestrator(), 
                 "WebScrapingAgent": WebScrapingAgent(),
+                # "VectorKnowlwdgeAgent": VectorKnowledgeAgent() 
                 # Add other agents as needed
             }
             

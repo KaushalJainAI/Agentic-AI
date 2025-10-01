@@ -216,7 +216,8 @@ class WebScrapingAgent:
         model_provider: str = "google_genai",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
-        tavily_api_key: Optional[str] = None
+        tavily_api_key: Optional[str] = None,
+        max_website_count: int = 10
     ):
         """
         Initialize the Chatbot with specified parameters.
@@ -231,6 +232,7 @@ class WebScrapingAgent:
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.max_website_count = max_website_count
         
         if not self.api_key:
             raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
@@ -330,7 +332,7 @@ class WebScrapingAgent:
     def search_node(self, state: GraphState) -> Dict[str, Any]:
         """Node to perform a web search."""
         print("--- SEARCH ---")
-        search_results = self.tavily_client.search(query=state['search_query'], max_results=20)
+        search_results = self.tavily_client.search(query=state['search_query'], max_results=self.max_website_count)
         urls = [result['url'] for result in search_results['results']]
         return {"urls": urls}
 
