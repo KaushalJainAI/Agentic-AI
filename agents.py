@@ -19,7 +19,7 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from datetime import datetime
 import ollama
-from langchain_community.chat_models import ChatOllama 
+from langchain_ollama import ChatOllama
 
 
 load_dotenv()
@@ -47,7 +47,9 @@ class Chatbot:
         model: str = "gemini-2.5-flash-lite-preview-06-17",
         model_provider: str = "google_genai",
         temperature: float = 0.7,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        use_local: bool = False,
+        local_model: str = "qwen3:4b",
     ):
         """
         Initialize the Chatbot with specified parameters.
@@ -62,17 +64,25 @@ class Chatbot:
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.use_local = use_local
+        self.local_model = local_model
         
         if not self.api_key:
             raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
         
-        # Initialize the LLM
-        self.llm = init_chat_model(
-            model=self.model,
-            model_provider=self.model_provider,
-            temperature=self.temperature,
-            api_key=self.api_key
-        )
+        if use_local:
+            self.llm = ChatOllama(
+                model=local_model,
+                temperature=temperature
+            )
+        else:
+            # Initialize the LLM
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
         
         # Build the graph
         self.graph = self._build_graph()
@@ -119,18 +129,18 @@ class Chatbot:
         
         return state['messages'][-1].content
     
-    def chat_with_history(self, messages: list) -> str:
-        """
-        Chat with conversation history.
+    # def chat_with_history(self, messages: list) -> str:
+    #     """
+    #     Chat with conversation history.
         
-        Args:
-            messages: List of message dictionaries with 'role' and 'content' keys
+    #     Args:
+    #         messages: List of message dictionaries with 'role' and 'content' keys
             
-        Returns:
-            The chatbot's response as a string
-        """
-        state = self.graph.invoke({"messages": messages})
-        return state['messages'][-1].content
+    #     Returns:
+    #         The chatbot's response as a string
+    #     """
+    #     state = self.graph.invoke({"messages": messages})
+    #     return state['messages'][-1].content
     
     def interactive_chat(self):
         """
@@ -164,20 +174,24 @@ class Chatbot:
             temperature: New temperature value
         """
         self.temperature = temperature
-        self.llm = init_chat_model(
-            model=self.model,
-            model_provider=self.model_provider,
-            temperature=self.temperature,
-            api_key=self.api_key
-        )
+        if self.use_local:
+            self.llm = ChatOllama(
+                model=self.local_model,
+                temperature=self.temperature
+            )
+        else:
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
         self.graph = self._build_graph()
 
         return f"Temperature updated successfully to {temperature}."
 
 
 from tavily import TavilyClient
-
-# --- State Definition (remains the same) ---
 
 class SchemaDefinition(BaseModel):
     """
@@ -187,26 +201,33 @@ class SchemaDefinition(BaseModel):
     type: str = Field(..., description="The Python type for the field, e.g., 'str', 'int', 'float', 'List[str]'.")
     description: str = Field(..., description="A clear, single-sentence description of the field's purpose.")
 
+
 class Plan(BaseModel):
     """
     The complete plan for research, including a search query and a structured output schema.
     Using SchemaDefinition here provides strong validation.
     """
     search_query: str = Field(..., description="A concise and effective search engine query designed to find the required information.")
-    Planschema: Dict[str, SchemaDefinition] = Field(..., description="The structured output schema, where each key is a field name and the value defines its type and description.")
+    PlanSchema: Dict[str, SchemaDefinition] = Field(..., description="The structured output schema, where each key is a field name and the value defines its type and description.")
+    num_websites: int = Field(default=5, description="Number of websites to scrape (2 for basic facts, 5+ for deep research)")
+    deep_research: bool = Field(default=False, description="True when the query requires exploring many websites to generate report")
 
-class GraphState(TypedDict):
+
+class GraphState(BaseModel):
     """Represents the state of our graph."""
-    prompt: str
-    search_query: str
-    # Note: We still use Dict[str, Any] here for the state itself, as the validation happens in the node.
-    PlanSchema: Dict[str, Any] 
-    urls: List[str]
-    scraped_content: str
-    structured_output: Dict[str, Any]
+    prompt: str = Field(default="")
+    search_query: str = Field(default="")
+    PlanSchema: Dict[str, Any] = Field(default_factory=dict)
+    urls: List[str] = Field(default_factory=list)
+    scraped_content: str = Field(default="")
+    structured_output: Dict[str, Any] = Field(default_factory=dict)
+    error_message: Optional[str] = Field(default=None)
+    research_summary: str = Field(default="")
+    num_websites: int = Field(default=5)
+    deep_research: bool = Field(default=False)
 
-# --- The Agent Object ---
-class WebScrapingAgent:
+
+class WebSearchingAgent:
     """
     An agent that dynamically scrapes web content based on a user prompt.
     """
@@ -217,52 +238,84 @@ class WebScrapingAgent:
         temperature: float = 0.7,
         api_key: Optional[str] = None,
         tavily_api_key: Optional[str] = None,
-        max_website_count: int = 10
+        max_website_count: int = 10,
+        local_model: str = "qwen3:4b",
+        use_local: bool = False,
     ):
         """
-        Initialize the Chatbot with specified parameters.
-        
+        Initialize the WebScrapingAgent with specified parameters.
+
         Args:
             model: Model name to use
             model_provider: Provider for the model
             temperature: Temperature setting for response generation
             api_key: API key (if None, will try to get from environment)
+            tavily_api_key: Tavily API key for web search
+            max_website_count: Maximum number of websites to search
+            local_model: Local model name if using local
+            use_local: Whether to use local model
         """
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.max_website_count = max_website_count
-        
-        if not self.api_key:
+        self.use_local = use_local
+        self.local_model = local_model
+
+        if not self.api_key and not use_local:
             raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
-        
-        # Initialize the LLM
-        self.llm = init_chat_model(
-            model=self.model,
-            model_provider=self.model_provider,
-            temperature=self.temperature,
-            api_key=self.api_key
-        )
+
+        if use_local:
+            self.llm = ChatOllama(
+                model=local_model,
+                temperature=temperature
+            )
+        else:
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
+
+        # Initialize Tavily client
+        self.tavily_client = TavilyClient(api_key=tavily_api_key)
 
         # Compile the graph and store it as an instance variable
         self.app = self._build_graph()
-        self.tavily_client = TavilyClient(api_key=tavily_api_key)
 
-    
+
     def _build_graph(self):
-        """Builds and compiles the LangGraph workflow."""
+        """Builds and compiles the LangGraph workflow with parallel branches."""
         workflow = StateGraph(GraphState)
         workflow.add_node("plan_node", self.plan_node)
         workflow.add_node("search_node", self.search_node)
         workflow.add_node("scrape_node", self.scrape_node)
+        workflow.add_node("merge_node", self.merge_node)
         workflow.add_node("extract_node", self.extract_node)
-        workflow.set_entry_point("plan_node")
-        workflow.add_edge("plan_node", "search_node")
-        workflow.add_edge("search_node", "scrape_node")
+
+        # Parallel branches - Fixed routing function
+        def route_to_parallel(state):
+            return ["plan_node", "search_node"]  # Route to both for parallel execution
+
+        workflow.add_conditional_edges(START, route_to_parallel)
+
+        # Search branch: search -> merge
+        workflow.add_edge("search_node", "merge_node")
+
+        # Plan branch: plan -> merge  
+        workflow.add_edge("plan_node", "merge_node")
+
+        # Scraping after taking the decision how many nodes to scrape
+        workflow.add_edge("merge_node", "scrape_node")
+
+        # After merge, proceed to extract
         workflow.add_edge("scrape_node", "extract_node")
         workflow.add_edge("extract_node", END)
+
         return workflow.compile()
+
 
     def _scrape_website(self, url: str) -> str:
         """Internal method to scrape a single webpage."""
@@ -276,46 +329,56 @@ class WebScrapingAgent:
         except requests.RequestException as e:
             return f"Failed to scrape {url}. Error: {e}"
 
+
     def plan_node(self, state: GraphState) -> Dict[str, Any]:
         """Node to generate a search query and a Pydantic PlanSchema."""
         print("--- PLAN ---")
         prompt_template = ChatPromptTemplate.from_messages([
             ("system", 
-            """You are an expert scrapping agent. Your task is to create a focused search query and a detailed PlanSchema to answer the user's request.
-            
+            """You are an expert scraping agent. Your task is to create a focused search query and a detailed PlanSchema to answer the user's request.
+
             For the PlanSchema field, return a dictionary where:
             - Each key is a field name (string)
             - Each value is an object with exactly two properties:
-            * "type": a string representing the Python type (e.g., "str", "int", "List[str]", "Optional[str]")
-            * "description": a string describing what this field represents
-            
-            Keep the PlanSchema focused with 3-6 relevant fields maximum."""
-            ),
+              * "type": a string representing the Python type (e.g., "str", "int", "List[str]", "Optional[str]")
+              * "description": a string describing what this field represents
+
+            Keep the PlanSchema focused with 3-6 relevant fields maximum.
+
+            For num_websites:
+            - Use 2 for simple factual queries (like "What is the capital of France?")  
+            - Use 5-8 for moderate research (like "Recent developments in AI")
+            - Use 8+ for deep research requiring comprehensive analysis
+
+            Set deep_research=True for queries requiring analysis of multiple sources, comparisons, or comprehensive reports.
+
+            Ensure the output strictly matches the Plan model structure to avoid errors."""),
             ("user", "Research request: {prompt}")
         ])
-        
+
         try:
             planner = prompt_template | self.llm.with_structured_output(Plan)
-            plan_result = planner.invoke({"prompt": state['prompt']})
-            
-            # Convert PlanSchemaDefinition objects to simple dictionaries
+            plan_result = planner.invoke({"prompt": state.prompt})
+
+            # Convert SchemaDefinition objects to simple dictionaries
             schema_as_dict = {}
             for key, schema_def in plan_result.PlanSchema.items():
                 schema_as_dict[key] = {
                     "type": schema_def.type,
                     "description": schema_def.description
                 }
-            
+
             return {
                 "search_query": plan_result.search_query, 
-                "PlanSchema": schema_as_dict
+                "PlanSchema": schema_as_dict,
+                "num_websites": plan_result.num_websites,
+                "deep_research": plan_result.deep_research,
             }
-        
+
         except Exception as e:
             print(f"Error in plan_node: {e}")
-            # Fallback schema
             return {
-                "search_query": state['prompt'],
+                "search_query": state.prompt,  # Use prompt as fallback query
                 "PlanSchema": {
                     "main_content": {
                         "type": "str", 
@@ -325,49 +388,83 @@ class WebScrapingAgent:
                         "type": "str", 
                         "description": "Brief summary of the findings"
                     }
-                }
+                },
+                "num_websites": 3,
+                "deep_research": False,
+                "error_message": str(e)
             }
 
 
     def search_node(self, state: GraphState) -> Dict[str, Any]:
-        """Node to perform a web search."""
+        """Node to perform a web search using prompt as fallback."""
         print("--- SEARCH ---")
-        search_results = self.tavily_client.search(query=state['search_query'], max_results=self.max_website_count)
+        query = state.search_query if state.search_query else state.prompt  # Fallback to prompt for parallelism
+
+        # Use the planned number of websites or default
+        max_results = min(state.num_websites or self.max_website_count, self.max_website_count)
+
+        search_results = self.tavily_client.search(query=query, max_results=max_results)
         urls = [result['url'] for result in search_results['results']]
         return {"urls": urls}
 
-    def scrape_node(self, state: GraphState) -> Dict[str, Any]:
+
+    def scrape_node(self, state: GraphState) -> Dict[str, Any]:  # Fixed signature - removed unused plan parameter
         """
         Node to scrape content from all provided URLs and combine them.
         """
-        if state.get("error_message") or not state.get("urls"):
+        if state.error_message or not state.urls:
             print("Skipping scrape due to previous failure or no URLs.")
             return {"scraped_content": "", "error_message": "No URLs to scrape."}
 
         print("--- SCRAPE (Cumulative) ---")
-        urls_to_try = state.get("urls", [])
+        urls_to_try = state.urls[:state.num_websites] if state.num_websites else state.urls  # Use planned number
         all_scraped_content = []
-        
+
         for i, url in enumerate(urls_to_try):
             print(f"Scraping URL {i + 1}/{len(urls_to_try)}: {url}")
             content = self._scrape_website(url)
-            
+
             # Check if the scrape was successful and add it to our list
             if "Successfully scraped content" in content:
                 print(f"--- Scrape successful for {url} ---")
                 all_scraped_content.append(content)
             else:
                 print(f"--- Scrape failed for {url}: {content.splitlines()[0]} ---")
-        
+
         # If no content was gathered from any URL
         if not all_scraped_content:
             print("--- All scraping attempts failed. ---")
             return {"scraped_content": "", "error_message": "All scraping attempts failed."}
-        
+
         # Combine all successful scrapes into one large string
         cumulative_content = "\n\n--- NEW SOURCE ---\n\n".join(all_scraped_content)
         print("--- Finished cumulative scraping. ---")
         return {"scraped_content": cumulative_content}
+
+
+    def merge_node(self, state: GraphState) -> Dict[str, Any]:
+        """Node to merge results from plan and search branches."""
+        print("--- MERGE ---")
+
+        # If we have both search query and URLs, we're good to proceed
+        if state.search_query and state.urls:
+            print(f"--- Merge successful: Query '{state.search_query}' with {len(state.urls)} URLs ---")
+            return {}
+
+        # If search failed but we have a query from planning, try search again
+        if state.search_query and not state.urls:
+            print(f"--- Re-running search with planned query: '{state.search_query}' ---")
+            try:
+                max_results = min(state.num_websites or self.max_website_count, self.max_website_count)
+                search_results = self.tavily_client.search(query=state.search_query, max_results=max_results)
+                urls = [result['url'] for result in search_results['results']]
+                return {"urls": urls}
+            except Exception as e:
+                return {"error_message": f"Refined search failed: {e}"}
+
+        # If neither worked, return error
+        return {"error_message": "Both planning and search phases failed"}
+
 
     def _safe_type_conversion(self, type_str: str) -> type:
         """Safely convert string type representation to actual type."""
@@ -387,63 +484,99 @@ class WebScrapingAgent:
         }
         return type_mapping.get(type_str, str)  # Default to str if not found
 
+
     def extract_node(self, state: GraphState) -> Dict[str, Any]:
         """Node to extract information based on the dynamic PlanSchema."""
         print("--- EXTRACT ---")
-        
+
         try:
-            # Create dynamic model with safe type conversion
+            # Create dynamic model with safe type conversion - FIXED field definitions format
             field_definitions = {}
-            for key, val in state['PlanSchema'].items():
+
+            # Add research_summary field properly
+            field_definitions["research_summary"] = (str, Field(description="Summary of research findings"))
+
+            # Add planned schema fields
+            for key, val in state.PlanSchema.items():
                 field_type = self._safe_type_conversion(val['type'])
                 field_definitions[key] = (field_type, Field(description=val['description']))
-            
+
             DynamicModel = create_model('DynamicModel', **field_definitions)
-            
+
             prompt_template = ChatPromptTemplate.from_messages([
                 ("system", "You are an expert data extractor. Extract the relevant information from the provided text that precisely answers the user's goal and format it according to the provided PlanSchema."),
                 ("user", "User Goal: {prompt}\n\nWebpage Content:\n{content}")
             ])
-            
+
             extractor = prompt_template | self.llm.with_structured_output(DynamicModel)
             extracted_data = extractor.invoke({
-                "prompt": state['prompt'], 
-                "content": state['scraped_content']
+                "prompt": state.prompt, 
+                "content": state.scraped_content
             })
-            
-            return {"structured_output": extracted_data.dict()}
-        
+
+            extracted_dict = extracted_data.model_dump()
+            research_summary = extracted_dict.pop("research_summary", "")
+
+            return {
+                "structured_output": extracted_dict,
+                "research_summary": research_summary
+            }
+
         except Exception as e:
             print(f"Error in extract_node: {e}")
-            return {"structured_output": {"error": f"Extraction failed: {str(e)}"}}
+            return {
+                "structured_output": {"error": f"Extraction failed: {str(e)}"},
+                "research_summary": "Failed to generate summary due to extraction error."
+            }
 
 
     def run(self, prompt: str):
         """The main entry point to run the agent."""
-        inputs = {"prompt": prompt}
-        final_state = self.app.invoke(inputs)
-        return final_state['structured_output']
+        inputs = GraphState(prompt=prompt)
+        final_state_dict = self.app.invoke(inputs.model_dump())  # LangGraph works with dicts internally
+        # Validate final state with BaseModel for safety
+        final_state = GraphState(**final_state_dict)
+
+        output = {
+            "structured_output": final_state.structured_output,
+            "research_summary": final_state.research_summary,
+            "sources": final_state.urls,
+            "deep_research": final_state.deep_research,
+            "websites_scraped": len([url for url in final_state.urls if url]) if final_state.urls else 0
+        }
+
+        return json.dumps(output, indent=2)
+
 
     def run_and_stream_watch(self, prompt: str):
         """
-        The main entry point to run the agent.
-        This method now streams the output of each node to the console.
+        The main entry point to run the agent with streaming output.
+        This method streams the output of each node to the console.
         """
-        inputs = {"prompt": prompt}
-        final_state = {}
+        inputs = GraphState(prompt=prompt)
+        final_state_dict = {}
 
         # Use app.stream() to see the output of each node
         print("--- 🚀 Starting Agent Run ---")
-        for output in self.app.stream(inputs, {"recursion_limit": 10}):
+        for output in self.app.stream(inputs.model_dump(), {"recursion_limit": 10}):
             for key, value in output.items():
                 print(f"\n--- ✅ Output from node: {key} ---")
-                # Pretty print the dictionary to see the state at each step
                 print(json.dumps(value, indent=2, ensure_ascii=False))
-                final_state = value # The last value holds the final state
+                final_state_dict.update(value)  # Merge dict updates
 
         print("\n--- 🏁 Agent Finished ---")
-        return final_state.get('structured_output', {"error": "Agent failed to produce a structured output."})
-    
+        # Validate final state with BaseModel
+        final_state = GraphState(**final_state_dict)
+
+        output = {
+            "structured_output": final_state.structured_output,
+            "research_summary": final_state.research_summary,
+            "sources": final_state.urls,
+            "deep_research": final_state.deep_research,
+            "websites_scraped": len([url for url in final_state.urls if url]) if final_state.urls else 0
+        }
+
+        return json.dumps(output, indent=2)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -483,24 +616,36 @@ class DatabaseDiscoveryAgent:
         model_provider: str = "google_genai",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
-        database_directory: str = "./Databases"
+        database_directory: str = "./Databases",
+        local_model: str = "qwen3:4b",
+        use_local: bool = False,
     ):
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.database_directory = database_directory
+        self.use_local = use_local
+        self.local_model = local_model
+        
+
         
         if not self.api_key:
             raise ValueError("API key is required. Provide it directly or set LLM_API_KEY in environment variable.")
         
         try:
-            self.llm = init_chat_model(
-                model=self.model,
-                model_provider=self.model_provider,
-                temperature=self.temperature,
-                api_key=self.api_key
-            )
+            if use_local:
+                self.llm = ChatOllama(
+                    model=local_model,
+                    temperature=temperature
+                )
+            else:
+                self.llm = init_chat_model(
+                    model=self.model,
+                    model_provider=self.model_provider,
+                    temperature=self.temperature,
+                    api_key=self.api_key
+                )
         except Exception as e:
             raise ValueError(f"Failed to initialize LLM: {e}")
 
@@ -633,23 +778,34 @@ class SQLQueryAgent:
         model: str = "gemini-2.5-pro",
         model_provider: str = "google_genai",
         temperature: float = 0.7,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        local_model: str = "qwen3:4b",
+        use_local: bool = False,
     ):
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.use_local = use_local
+        self.local_model = local_model
+
         
         if not self.api_key:
             raise ValueError("API key is required.")
         
         try:
-            self.llm = init_chat_model(
-                model=self.model,
-                model_provider=self.model_provider,
-                temperature=self.temperature,
-                api_key=self.api_key
-            )
+            if use_local:
+                self.llm = ChatOllama(
+                    model=local_model,
+                    temperature=temperature
+                )
+            else:
+                self.llm = init_chat_model(
+                    model=self.model,
+                    model_provider=self.model_provider,
+                    temperature=self.temperature,
+                    api_key=self.api_key
+                )
         except Exception as e:
             raise ValueError(f"Failed to initialize LLM: {e}")
 
@@ -799,23 +955,35 @@ class FlatFileQueryAgent:
         model: str = "gemini-2.5-pro",
         model_provider: str = "google_genai",
         temperature: float = 0.7,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        local_model: str = "qwen3:4b",
+        use_local: bool = False,
     ):
         self.model = model
         self.model_provider = model_provider
         self.temperature = temperature
         self.api_key = api_key or os.getenv("LLM_API_KEY")
+        self.use_local = use_local
+        self.local_model = local_model
         
+
+
         if not self.api_key:
             raise ValueError("API key is required.")
         
         try:
-            self.llm = init_chat_model(
-                model=self.model,
-                model_provider=self.model_provider,
-                temperature=self.temperature,
-                api_key=self.api_key
-            )
+            if use_local:
+                self.llm = ChatOllama(
+                    model=local_model,
+                    temperature=temperature
+                )
+            else:
+                self.llm = init_chat_model(
+                    model=self.model,
+                    model_provider=self.model_provider,
+                    temperature=self.temperature,
+                    api_key=self.api_key
+                )
         except Exception as e:
             raise ValueError(f"Failed to initialize LLM: {e}")
 
@@ -970,29 +1138,41 @@ class DatabaseQueryOrchestrator:
         model_provider: str = "google_genai",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
-        database_directory: str = "./Databases"
+        database_directory: str = "./Databases",
+        local_model: str = "qwen3:4b",
+        use_local: bool = False,
     ):
+        self.use_local = use_local
+        self.local_model = local_model
+        
+
         # Initialize all three agents
         self.discovery_agent = DatabaseDiscoveryAgent(
             model=model,
             model_provider=model_provider,
             temperature=temperature,
             api_key=api_key,
-            database_directory=database_directory
+            database_directory=database_directory,
+            local_model=local_model,
+            use_local=use_local
         )
         
         self.sql_agent = SQLQueryAgent(
             model=model,
             model_provider=model_provider,
             temperature=temperature,
-            api_key=api_key
+            api_key=api_key,
+            local_model=local_model,
+            use_local=use_local
         )
         
         self.flatfile_agent = FlatFileQueryAgent(
             model=model,
             model_provider=model_provider,
             temperature=temperature,
-            api_key=api_key
+            api_key=api_key,
+            local_model=local_model,
+            use_local=use_local
         )
     
     def query(self, user_query: str) -> Dict[str, Any]:
@@ -1216,7 +1396,8 @@ class VectorKnowledgeAgent:
         embedding_model: str = "Qwen/Qwen3-Embedding-4B",
         temperature: float = 0.7,
         api_key: Optional[str] = None,
-        index_path: Optional[str] = "./knowledge_base"
+        index_path: Optional[str] = "./knowledge_base",
+
     ):
         self.model = model
         self.model_provider = model_provider

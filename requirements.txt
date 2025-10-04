@@ -10,7 +10,8 @@ langchain-community
 
 # Google genai
 langchain-google-genai
-
+langchain-ollama
+langchain-perplexity
 
 
 # Vector Database & Embeddings

@@ -118,6 +118,11 @@ class SuperAgentTelegramBot:
             first_name=user.first_name,
             last_name=user.last_name
         )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"http://{os.getenv('SUPERAGENT_HOST')}:{os.getenv('SUPERAGENT_PORT')}/clearMem") as resp:
+                result = await resp.json()
+                self.logger.info(f"Memory cleared response: {result}")
+        self.logger.info(f"User {user.id} started the bot. Previous Memory Cleared")
         
         welcome_message = (
             f"🤖 **Welcome to {self.name}!**\n\n"
@@ -130,8 +135,9 @@ class SuperAgentTelegramBot:
             "Just type your question or request, and I'll process it automatically!\n\n"
             "Type /help to see available commands."
         )
-        await update.message.reply_text(welcome_message, parse_mode='HTML')
+        await update.message.reply_text(welcome_message, parse_mode=None)
         self.logger.info(f"Start command used by user {update.effective_user.id}")
+
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
@@ -148,7 +154,7 @@ class SuperAgentTelegramBot:
             "• \"What's the weather like?\"\n"
             "• \"Help me with data analysis\""
         )
-        await update.message.reply_text(help_text, parse_mode='HTML')
+        await update.message.reply_text(help_text, parse_mode=None)
         self.logger.info(f"Help command used by user {update.effective_user.id}")
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,7 +173,7 @@ class SuperAgentTelegramBot:
             status_message = "❌ **System Status: Offline**\n\nCannot connect to backend services."
             self.logger.error(f"Status check failed: {e}")
         
-        await update.message.reply_text(status_message, parse_mode='HTML')
+        await update.message.reply_text(status_message, parse_mode=None)
         self.logger.info(f"Status command used by user {update.effective_user.id}")
     
     async def queue_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,7 +187,7 @@ class SuperAgentTelegramBot:
             f"• Active tasks: {active_tasks}\n"
             f"• Processing users: {len(self.processing_users)}"
         )
-        await update.message.reply_text(status_message, parse_mode='HTML')
+        await update.message.reply_text(status_message, parse_mode=None)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle regular text messages with immediate response and background processing"""
@@ -207,7 +213,7 @@ class SuperAgentTelegramBot:
         if user_id in self.processing_users:
             await update.message.reply_text(
                 "⏳ I'm currently processing your previous request. Please wait for it to complete before sending a new one.",
-                parse_mode='HTML'
+                parse_mode=None
             )
             return
         
@@ -215,14 +221,14 @@ class SuperAgentTelegramBot:
         if self.task_queue.qsize() >= self.max_queue_size:
             await update.message.reply_text(
                 "🚦 The system is currently busy processing other requests. Please try again in a moment.",
-                parse_mode='HTML'
+                parse_mode=None
             )
             return
         
         # Send immediate acknowledgment
         await update.message.reply_text(
             "🤖 I've received your request and started processing it. I'll send you the response automatically when it's ready!",
-            parse_mode='HTML'
+            parse_mode=None
         )
         
         # Send typing action
@@ -250,7 +256,7 @@ class SuperAgentTelegramBot:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="❌ Sorry, I couldn't queue your request. Please try again.",
-                parse_mode='HTML'
+                parse_mode=None
             )
     
     async def background_processor(self):
@@ -314,10 +320,10 @@ class SuperAgentTelegramBot:
                     success = data.get("success", False)
                     metadata = data.get("metadata", {})
                     
-                    # Add metadata info for transparency
-                    if success and metadata.get("agent_used"):
-                        agent_used = metadata["agent_used"]
-                        reply += f"\n\n_Processed by: {agent_used}_"
+                    # # Add metadata info for transparency
+                    # if success and metadata.get("agent_used"):
+                    #     agent_used = metadata["agent_used"]
+                    #     reply += f"\n\n_Processed by: {agent_used}_"
                     
                     return reply
                     
@@ -330,6 +336,7 @@ class SuperAgentTelegramBot:
     
     async def _send_automatic_response(self, chat_id: int, message: str):
         """Send automatic response to user"""
+        print(message)
         try:
             # Ensure message isn't too long for Telegram
             if len(message) > 4000:
@@ -338,14 +345,16 @@ class SuperAgentTelegramBot:
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=message,
-                parse_mode='HTML'
+                parse_mode=None
             )
             
             self.logger.info(f"Automatic response sent to chat {chat_id}")
             
         except Exception as e:
             self.logger.error(f"Failed to send automatic response to chat {chat_id}: {e}")
-    
+            return "❌ Failed to send automatic response. Please try again."
+
+        
     async def broadcast_message(self, message: str):
         """Send message to all users (example of background messaging)"""
         users = self.db.get_all_users()
@@ -355,7 +364,7 @@ class SuperAgentTelegramBot:
                 await self.bot.send_message(
                     chat_id=user["chat_id"],
                     text=message,
-                    parse_mode='HTML'
+                    parse_mode=None
                 )
                 await asyncio.sleep(0.1)  # Rate limiting
             except Exception as e:
@@ -440,7 +449,7 @@ async def scheduled_message_example():
             await bot.send_message(
                 chat_id=user["chat_id"],
                 text=message,
-                parse_mode='HTML'
+                parse_mode=None
             )
             await asyncio.sleep(0.1)  # Rate limiting
         except Exception as e:

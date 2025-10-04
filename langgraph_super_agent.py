@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Import your existing agents (they're in the same directory)
 from agents import (
-    Chatbot, WebScrapingAgent, DatabaseQueryOrchestrator, 
+    Chatbot, WebSearchingAgent, DatabaseQueryOrchestrator, 
     SQLQueryAgent #,VectorKnowledgeAgent
 )
 
@@ -105,7 +105,13 @@ class SuperAgentOrchestrator:
 
         # Configure memory for state persistence
         self.memory = MemorySaver()
-        self.compiled_workflow = self.workflow.compile()
+        self.compiled_workflow = self.workflow.compile(
+            # checkpointer=self.memory
+        )
+
+    def clear_memory(self):
+        self.memory.clear()
+        return True
 
     def _build_agent_summary(self) -> str:
         """Build formatted agent information for selection"""
@@ -175,6 +181,16 @@ Available Agents:
 
 For the query: "{query}"
 
+You are a Large language model and you should know your capabilities what you can do and what you can't do. You are not updated with latest data always, so be wise.
+Here's how models typically handle queries about events that have occurred later than their knowledge cutoff:
+
+1. **Acknowledgment of Cutoff**: The model will acknowledge its knowledge cutoff and inform the user that it does not have information about events occurring after that date. This is a transparent way to manage user expectations and avoid speculation.
+
+2. **Avoidance of Speculation**: Models are designed to avoid speculating about events or information they do not have. Instead, they might suggest looking for more recent sources or updates from other platforms.
+
+3. **Redirecting to Other Sources**: Sometimes, models might suggest searching online or consulting other sources for information about recent events, as they cannot provide accurate or up-to-date details.
+
+4. **Focus on Available Information**: The model will focus on providing information available up to its cutoff date, ensuring that any responses are based on the data it was trained on.
 Select the most appropriate agent and provide your analysis in JSON format."""
 
             # Get structured intent from LLM

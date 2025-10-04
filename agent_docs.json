@@ -20,12 +20,6 @@
           "message": {"type": "str", "required": true, "description": "The user's message"}
         }
       },
-      "chat_with_history": {
-        "description": "Send a list of messages (with role, content keys) for multi-turn chat; return response.",
-        "parameters": {
-          "messages": {"type": "list", "required": true, "description": "List of message dictionaries with 'role' and 'content' keys"}
-        }
-      },
       "interactive_chat": {
         "description": "Start an interactive CLI chat session.",
         "parameters": {}

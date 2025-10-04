@@ -4,12 +4,15 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 from typing import Dict, Any
 
+import re
+
 # Import your SuperAgent Orchestrator
 from langgraph_super_agent import SuperAgentOrchestrator
 from agents import (
-    Chatbot, WebScrapingAgent, DatabaseQueryOrchestrator, 
+    Chatbot, WebSearchingAgent, DatabaseQueryOrchestrator, 
     VectorKnowledgeAgent
 )
+ppx_api_key = os.getenv("PERPLEXITY_API_KEY")
 
 # Configure logging
 logging.basicConfig(
@@ -35,9 +38,9 @@ class SuperAgentFlaskApp:
         try:
             # Initialize your agents (same as in your original code)
             agents = {
-                "Chatbot": Chatbot(), 
+                "Chatbot": Chatbot(use_local=False, model_provider = 'perplexity', model= 'sonar', local_model="qwen3:4b", api_key=ppx_api_key), 
                 "DatabaseOrchestrator": DatabaseQueryOrchestrator(), 
-                "WebScrapingAgent": WebScrapingAgent(),
+                "WebScrapingAgent": WebSearchingAgent(use_local=True, model_provider = 'perplexity', model= 'sonar', local_model="qwen3:4b", max_website_count=5, api_key=ppx_api_key),
                 # "VectorKnowlwdgeAgent": VectorKnowledgeAgent() 
                 # Add other agents as needed
             }
@@ -59,6 +62,10 @@ class SuperAgentFlaskApp:
         @self.app.route('/chat', methods=['POST'])
         def chat_endpoint():
             return self.chat_endpoint()
+        
+        @self.app.route('/clearMem', methods=['POST'])
+        def clear_memory():
+            return jsonify({"success": self.orchestrator.clear_memory()})
     
     def health_check(self):
         """Health check endpoint"""
@@ -137,7 +144,7 @@ class SuperAgentFlaskApp:
                         "workflow_status": result.get("status", "unknown"),
                         "completed_steps": result.get("completed_steps", []),
                         "thread_id": result.get("thread_id"),
-                        "agent_used": self._extract_agent_used(result)
+                        # "agent_used": self._extract_agent_used(result)
                     }
                 }
                 
@@ -185,7 +192,7 @@ class SuperAgentFlaskApp:
                 run_result = agent_results["run"]
                 if isinstance(run_result, dict):
                     response = run_result.get("main_content", 
-                            run_result.get("summary", str(run_result)))
+                            run_result.get("summary", str(run_result))) + run_result.get("summary", "")
                 else:
                     response = str(run_result)
                     
@@ -196,9 +203,12 @@ class SuperAgentFlaskApp:
                 response = str(first_result)
             
             # Telegram character limit handling
-            if len(response) > 3500:
-                response = response[:3500] + "\n\n...(response truncated for length)"
-            
+            if len(response) > 13500:
+                response = response[:13500] + "\n\n...(response truncated for length)"
+
+            response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
+            print(response)            
+
             return response
             
         except Exception as e:
