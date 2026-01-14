@@ -8,11 +8,13 @@ from dataclasses import dataclass
 import operator
 
 from pydantic import BaseModel, Field
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
+from langchain.chat_models import init_chat_model
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,8 +23,14 @@ logger = logging.getLogger(__name__)
 # Import your existing agents (they're in the same directory)
 from agents import (
     Chatbot, WebSearchingAgent, DatabaseQueryOrchestrator, 
-    SQLQueryAgent #,VectorKnowledgeAgent
+    SQLQueryAgent , UnifiedMemoryAgent
 )
+
+# from tools import (
+#     SystemTimeTool, MathTool, PythonExecutorTool, WebSearchTool, JavaScriptExecutorInput, 
+#     WebScraperTool, FileHandlerTool, DataVisualizerTool
+# )
+
 
 
 # Enhanced State Management for LangGraph
@@ -72,6 +80,32 @@ class AgentMethodCall(BaseModel):
     kwargs: Dict[str, str] = Field(default_factory=dict, description="Keyword arguments")
 
 
+# class ToolNode:
+#     """A node that runs the tools requested in the last AIMessage"""
+
+#     def __init__(self, tools:list):
+#         self.tools_by_name = {tool.name: tool for tool in tools}
+
+#     def __call__(self, inputs: dict):
+#         if messages := inputs.get("messages", []):
+#             message = messages[-1]
+#         else:
+#             raise ValueError("No message found in input")
+#         outputs = []
+#         for tool_call in message.tool_calls:
+#             tool_result = self.tools_by_name[tool_call["name"]].invoke(
+#                 tool_call["args"]
+#             )
+#             outputs.append(
+#                 ToolMessage(
+#                     content=json.dumps(tool_result),
+#                     name=tool_call["name"],
+#                     tool_call_id=tool_call["id"],
+#                 )
+#             )
+#         return {"messages": outputs}
+
+
 class SuperAgentOrchestrator:
     """
     LangGraph-based agent orchestrator that replaces the original SuperVisor.
@@ -83,15 +117,30 @@ class SuperAgentOrchestrator:
     - Implements proper state isolation between requests
     """
 
-    def __init__(self, agents: Dict[str, Any]):
+    def __init__(self, agents: Dict[str, Any], use_local=True, api_key=None, model_provider=None, model_name=None):
         self.agents = agents
+        self.model_provider = model_provider
+        self.model = model_name
+        self.temperature = 0.7
+        self.api_key = api_key
+
 
         # Initialize LLM with structured output capability
-        self.llm = ChatOllama(
-            model="qwen3:4b", 
-            temperature=0.1,
-            format="json"
-        )
+        if use_local:
+            self.llm = ChatOllama(
+                model="qwen3:4b", 
+                temperature=0.1,
+                format="json"
+            )
+        else:
+            # Initialize the LLM
+            self.llm = init_chat_model(
+                model=self.model,
+                model_provider=self.model_provider,
+                temperature=self.temperature,
+                api_key=self.api_key
+            )
+
 
         # Load agent metadata
         with open('agent_docs.json', 'r', encoding='utf-8') as f:
@@ -519,7 +568,7 @@ if __name__ == "__main__":
         # "SQLQueryAgent": SQLQueryAgent(), 
         "DatabaseOrchestrator": DatabaseQueryOrchestrator(), 
         # "FlatFileQueryAgent": FlatFileQueryAgent(),
-        "WebScrapingAgent": WebScrapingAgent(),
+        "WebScrapingAgent": WebSearchingAgent(),
         # "VectorKnowledgeAgent": VectorKnowledgeAgent()
     }
 

@@ -171,81 +171,103 @@
       "api_key": null
     }
   },
-  "VectorKnowledgeAgent": {
-    "description": "An intelligent agent for managing, querying, and augmenting a Faiss-based vector knowledge database. It integrates semantic search, contextual prompt generation, and metadata-aware retrieval for building RAG pipelines.",
+  "UnifiedMemoryAgent": {
+    "description": "A next-generation multimodal vector knowledge agent using Faiss and MongoDB. It supports semantic and hybrid search across text, images, PDFs, audio, and dense metadata, integrates ratings/feedback, tags, user personalization, and stores reasoning chains for robust, context-aware RAG pipelines.",
     "capabilities": [
-      "Ingest and chunk large documents",
-      "Generate embeddings using SentenceTransformers",
-      "Store and index knowledge with Faiss",
-      "Perform vector similarity search with cosine normalization",
-      "Apply metadata-based filtering",
-      "Generate optimized contextual prompts via LLM",
-      "Provide statistics and diagnostics about the knowledge base"
+      "Ingest and index multimodal documents (text, images, PDFs, audio, transcripts)",
+      "Generate embeddings using advanced SentenceTransformers",
+      "Store and retrieve entries with MongoDB (supporting tags, categories, rich metadata, user IDs)",
+      "Perform semantic vector similarity search with hybrid tag/category/keyword/user/time filters",
+      "Filter by metadata: category, tags, recency (year), user, or keyword",
+      "Track feedback: upvote/downvote solutions/workflows to improve future retrieval order",
+      "Store and utilize reasoning chains and decision trees for complex answers",
+      "Provide hybrid retrieval: combine semantic (vector) and traditional (keyword/tag) search",
+      "Enable user-specific and personalized retrieval based on user profile or history",
+      "Persist/load Faiss index and MongoDB state for fast, reliable access",
+      "Return statistics about index size, category/tag breakdown, recency, and feedback"
     ],
     "use_cases": [
-      "Semantic search across knowledge bases",
-      "Contextual augmentation for LLM queries",
-      "Metadata-aware document retrieval",
-      "Prompt optimization for downstream agents",
-      "Knowledge management with persistent storage"
+      "Multimodal semantic search (across text, image, PDF, and audio knowledge)",
+      "Enterprise or team knowledge bases with workflow/history and RAG augmentation",
+      "Personalized helpdesk, FAQ or code assistant with instant recall and learning",
+      "Legal, medical, or research case retrieval by type, tag, user, or recency",
+      "Project documentation, decision-flow, and reasoning-chain archiving",
+      "RAG for chatbots and LLM-driven apps with filtered, personalized context"
     ],
     "workflow": [
-      "Initialize embedding + LLM models",
-      "Load or create Faiss index",
-      "Ingest documents (with chunking and metadata)",
-      "Generate normalized embeddings and update index",
-      "Query knowledge base with similarity + metadata filters",
-      "Retrieve and merge context snippets",
-      "Generate contextual prompt with LLM integration",
-      "Persist index and metadata for reuse",
-      "Get knowledge base statistics"
+      "Initialize embedding model, Faiss index, MongoDB, and Pydantic schemas",
+      "Ingest and index multimodal documents with accompanying tags/categories, reasoning chains, and user/profile metadata",
+      "Encode embeddings and update the hybrid Faiss/MongoDB index",
+      "Query using semantic similarity, filtered by tags, keyword, user, rating, or recency",
+      "Merge, rank, and return context (with feedback and rating awareness)",
+      "Support user upvotes/downvotes; update rating fields to bias future results",
+      "Return statistics: entry counts, category/tag breakdown, rating histograms, recent activity"
     ],
     "methods": {
-      "add_knowledge": {
-        "description": "Add documents or text to the vector database with optional chunking and metadata.",
+      "save_knowledge": {
+        "description": "Add a new knowledge entry, with support for multimodal content, tags, category, metadata, user, rating, and reasoning.",
         "parameters": {
-          "content": {"type": "str", "required": true, "description": "Text content to add"},
-          "metadata": {"type": "dict", "required": false, "default": {}, "description": "Optional metadata dictionary"},
-          "chunk_size": {"type": "int", "required": false, "default": 1000, "description": "Size of text chunks"},
-          "chunk_overlap": {"type": "int", "required": false, "default": 200, "description": "Overlap between chunks"}
+          "entry": {
+            "type": "KnowledgeEntry (Pydantic Model)",
+            "required": true,
+            "description": "Knowledge object including text, image/audio/pdf paths, tags, ratings, user, reasoning chain, and metadata"
+          }
         }
       },
-      "query_knowledge": {
-        "description": "Run similarity search with optional metadata filters to return ranked contextual snippets.",
+      "save_workflow": {
+        "description": "Add a workflow/decision chain with all structured and contextual fields.",
         "parameters": {
-          "query": {"type": "str", "required": true, "description": "Search query text"},
-          "top_k": {"type": "int", "required": false, "default": 5, "description": "Number of top results to return"},
-          "metadata_filter": {"type": "dict", "required": false, "default": {}, "description": "Metadata filtering criteria"},
-          "min_score": {"type": "float", "required": false, "default": 0.0, "description": "Minimum similarity score"}
+          "workflow": {
+            "type": "WorkflowMemory (Pydantic Model)",
+            "required": true,
+            "description": "Workflow object including task, plan, user/tags/metadata, rating and reasoning"
+          }
         }
       },
-      "generate_contextual_prompt": {
-        "description": "Build an optimized LLM prompt using retrieved knowledge and task-specific instructions.",
+      "retrieve_similar": {
+        "description": "Hybrid retrieval of similar context by vector similarity, with optional filters for tags, category, user, keyword, recency, or rating.",
         "parameters": {
-          "query": {"type": "str", "required": true, "description": "User query"},
-          "context_snippets": {"type": "list", "required": true, "description": "Retrieved knowledge snippets"},
-          "task_instructions": {"type": "str", "required": false, "default": "", "description": "Specific task instructions"},
-          "max_context_length": {"type": "int", "required": false, "default": 4000, "description": "Maximum context length"}
+          "new_query": { "type": "str", "required": true },
+          "category": { "type": "str", "required": false },
+          "tags": { "type": "list", "required": false },
+          "user_id": { "type": "str", "required": false },
+          "top_k": { "type": "int", "default": 3 },
+          "similarity_threshold": { "type": "float", "default": 0.6 },
+          "keyword": { "type": "str", "required": false },
+          "years_filter": { "type": "int", "required": false }
         }
       },
-      "get_knowledge_stats": {
-        "description": "Return statistics such as total entries, categories, average content length, and index size.",
+      "solve_with_memory": {
+        "description": "Semantic + metadata retrieval; returns best solution/workflow ranked by feedback and context with hybrid filtering support.",
+        "parameters": {
+          "bug_or_query": { "type": "str", "required": true },
+          "category": { "type": "str", "required": false },
+          "tags": { "type": "list", "required": false },
+          "user_id": { "type": "str", "required": false },
+          "keyword": { "type": "str", "required": false },
+          "years_filter": { "type": "int", "required": false }
+        }
+      },
+      "update_rating": {
+        "description": "Upvote (delta=1) or downvote (delta=-1) a result by entry ID to affect future answer recommendations.",
+        "parameters": {
+          "entry_id": { "type": "str", "required": true },
+          "is_workflow": { "type": "bool", "required": true },
+          "delta": { "type": "int", "required": true }
+        }
+      },
+      "get_stats": {
+        "description": "Return knowledge base statistics and diagnostics (categories, size, recency, rating feedback, etc.).",
         "parameters": {}
-      },
-      "save_index": {
-        "description": "Persist the Faiss index, metadata, and knowledge store to disk.",
-        "parameters": {
-          "path": {"type": "str", "required": false, "default": "./knowledge_base", "description": "Save path for index"}
-        }
       }
     },
     "parameters": {
-      "model": "gemini-2.5-pro",
-      "model_provider": "google_genai",
-      "embedding_model": "sentence-transformers/all-mpnet-base-v2",
-      "temperature": 0.7,
-      "api_key": null,
-      "index_path": "./knowledge_base"
+      "embedding_model": "all-MiniLM-L6-v2",
+      "faiss_index_path": "./faiss_multi_index",
+      "mongo_uri": "mongodb://localhost:27017/",
+      "mongo_db": "agent_db",
+      "knowledge_collection": "knowledge",
+      "workflow_collection": "workflows"
     }
   },
   "DatabaseQueryOrchestrator": {

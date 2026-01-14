@@ -1303,455 +1303,302 @@ class DatabaseQueryOrchestrator:
             return error_output
 
 
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Dict, Any, Optional, Union
-from sentence_transformers import SentenceTransformer
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-import faiss
-
-import numpy as np
+import os
 import pickle
+import uuid
+from typing import List, Dict, Any, Optional, Union
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+from pymongo import MongoClient
+from pydantic import BaseModel, Field
 
+# --- Multi-modal Content Types ---
+class MultiModalContent(BaseModel):
+    text: Optional[str] = None
+    image_path: Optional[str] = None  # Local or remote path
+    pdf_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    transcript: Optional[str] = None
+
+# --- Reasoning Chains (for each answer) ---
+class ReasonChainStep(BaseModel):
+    step: str
+    evidence: Optional[str]
+    next_step: Optional[int]
+
+class ReasoningChain(BaseModel):
+    chain: List[ReasonChainStep] = Field(default_factory=list)
+    decision_tree: Optional[Dict[str, Any]] = None
 
 class KnowledgeEntry(BaseModel):
-    """Structure for knowledge entries with validation"""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    
-    content: str = Field(..., min_length=1, description="Knowledge content")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Associated metadata")
-    embedding: Optional[np.ndarray] = Field(default=None, description="Vector embedding")
-    
-    def model_dump_for_storage(self) -> Dict[str, Any]:
-        """Custom serialization excluding numpy arrays"""
-        data = self.model_dump(exclude={'embedding'})
-        return data
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    query: str
+    solution: str
+    category: str
+    tags: List[str] = Field(default_factory=list)
+    rating: int = 0  # Feedback: upvotes - downvotes
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    user_id: Optional[str] = None
+    content: Optional[MultiModalContent] = None
+    reasoning: Optional[ReasoningChain] = None
 
-class QueryResult(BaseModel):
-    """Structure for query results with validation"""
-    query: str = Field(..., min_length=1, description="Original search query")
-    similar_contexts: List[Dict[str, Any]] = Field(default_factory=list, description="Retrieved contexts")
-    total_results: int = Field(ge=0, description="Number of results found")
-    similarity_scores: List[float] = Field(
-        default_factory=list, 
-        description="Similarity scores for results"
-    )
-    retrieved_knowledge: str = Field(default="", description="Combined knowledge text")
-    
-    @field_validator('similarity_scores')
-    @classmethod
-    def validate_similarity_scores(cls, v, info):
-        """Ensure similarity scores are between 0 and 1"""
-        if any(score < 0 or score > 1 for score in v):
-            raise ValueError("Similarity scores must be between 0 and 1")
-        return v
-    
-    @field_validator('total_results')
-    @classmethod
-    def validate_total_results(cls, v, info):
-        """Ensure total_results matches similar_contexts length"""
-        similar_contexts = info.data.get('similar_contexts', [])
-        if len(similar_contexts) != v:
-            raise ValueError("total_results must match length of similar_contexts")
-        return v
+class WorkflowMemory(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    original_query: str
+    workflow_plan: List[str]
+    final_answer: str
+    category: str
+    tags: List[str] = Field(default_factory=list)
+    rating: int = 0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    user_id: Optional[str] = None
+    content: Optional[MultiModalContent] = None
+    reasoning: Optional[ReasoningChain] = None
 
-class KnowledgeStats(BaseModel):
-    """Statistics about the knowledge base"""
-    total_entries: int = Field(ge=0, description="Total knowledge entries")
-    categories: Dict[str, int] = Field(default_factory=dict, description="Categories breakdown")
-    avg_content_length: float = Field(ge=0, description="Average content length")
-    index_size: int = Field(ge=0, description="Faiss index size")
-    last_updated: Optional[str] = Field(default=None, description="Last update timestamp")
-
-class ContextualPromptResult(BaseModel):
-    """Result from contextual prompt generation"""
-    original_query: str = Field(..., description="Original user query")
-    task_type: str = Field(default="general", description="Type of task")
-    optimized_prompt: str = Field(..., description="Generated optimized prompt")
-    context_summary: str = Field(..., description="Summary of context used")
-    task_instructions: List[str] = Field(default_factory=list, description="Task-specific instructions")
-    confidence_score: float = Field(ge=0, le=1, description="Confidence in context relevance")
-    contexts_used: List[Dict[str, Any]] = Field(default_factory=list, description="Contexts that were used")
-    knowledge_retrieved: str = Field(default="", description="Raw knowledge retrieved")
-    
-    @field_validator('confidence_score')
-    @classmethod
-    def validate_confidence(cls, v):
-        """Ensure confidence score is between 0 and 1"""
-        if not 0 <= v <= 1:
-            raise ValueError("Confidence score must be between 0 and 1")
-        return v
-
-
-
-class VectorKnowledgeAgent:
-    """
-    Agent for managing and querying a Faiss-based vector knowledge database.
-    """
-    
+class UnifiedMemoryAgent:
     def __init__(
         self,
-        model: str = "gemini-2.5-pro",
-        model_provider: str = "google_genai", 
-        embedding_model: str = "Qwen/Qwen3-Embedding-4B",
-        temperature: float = 0.7,
-        api_key: Optional[str] = None,
-        index_path: Optional[str] = "./knowledge_base",
-
+        embedding_model: str = "all-MiniLM-L6-v2",
+        faiss_index_path: str = "./faiss_multi_index",
+        mongo_uri: str = "mongodb://localhost:27017/",
+        mongo_db: str = "agent_db",
+        knowledge_collection: str = "knowledge",
+        workflow_collection: str = "workflows"
     ):
-        self.model = model
-        self.model_provider = model_provider
-        self.temperature = temperature
-        self.api_key = api_key or os.getenv("LLM_API_KEY")
-        self.index_path = index_path
-        
-        # Initialize embedding model
-        try:
-            self.embedding_model = SentenceTransformer(embedding_model)
-            self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
-        except Exception as e:
-            raise ValueError(f"Failed to initialize embedding model: {e}")
-        
-        # Initialize LLM
-        if not self.api_key:
-            raise ValueError("API key is required.")
-            
-        try:
-            self.llm = init_chat_model(
-                model=self.model,
-                model_provider=self.model_provider,
-                temperature=self.temperature,
-                api_key=self.api_key
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to initialize LLM: {e}")
-        
-        # Initialize Faiss index
-        self.index = None
-        self.knowledge_store = []
-        self.metadata_store = []
-        
-        # Load existing index if available
-        self._load_or_create_index()
-    
-    def _load_or_create_index(self):
-        """Load existing index or create a new one"""
-        try:
-            if os.path.exists(f"{self.index_path}.index"):
-                self.index = faiss.read_index(f"{self.index_path}.index")
-                
-                # Load metadata
-                with open(f"{self.index_path}_metadata.pkl", 'rb') as f:
-                    self.metadata_store = pickle.load(f)
-                    
-                # Load knowledge store
-                with open(f"{self.index_path}_knowledge.pkl", 'rb') as f:
-                    self.knowledge_store = pickle.load(f)
-                    
-                logger.info(f"Loaded existing index with {self.index.ntotal} vectors")
-            else:
-                # Create new index
-                self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner Product for cosine similarity
-                self.index = faiss.IndexIDMap(self.index)
-                logger.info("Created new Faiss index")
-                
-        except Exception as e:
-            logger.error(f"Error loading/creating index: {e}")
-            self.index = faiss.IndexFlatIP(self.embedding_dim)
-            self.index = faiss.IndexIDMap(self.index)
-    
-    def add_knowledge(
-        self, 
-        content: Union[str, List[str]], 
-        metadata: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 100
-    ) -> Dict[str, Any]:
-        """
-        Add knowledge to the vector database
-        """
-        try:
-            # Handle single string input
-            if isinstance(content, str):
-                content = [content]
-                metadata = [metadata] if metadata else [{}]
-            
-            # Handle metadata
-            if metadata is None:
-                metadata = [{}] * len(content)
-            elif isinstance(metadata, dict):
-                metadata = [metadata] * len(content)
-            
-            # Text splitting for large documents
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
-            )
-            
-            all_chunks = []
-            all_metadata = []
-            
-            for i, doc_content in enumerate(content):
-                chunks = text_splitter.split_text(doc_content)
-                
-                for j, chunk in enumerate(chunks):
-                    chunk_metadata = metadata[i].copy()
-                    chunk_metadata.update({
-                        'doc_index': i,
-                        'chunk_index': j,
-                        'total_chunks': len(chunks),
-                        'char_count': len(chunk)
-                    })
-                    
-                    all_chunks.append(chunk)
-                    all_metadata.append(chunk_metadata)
-            
-            # Generate embeddings
-            embeddings = self.embedding_model.encode(all_chunks, convert_to_numpy=True)
-            
-            # Normalize embeddings for cosine similarity
-            faiss.normalize_L2(embeddings)
-            
-            # Add to index
-            start_id = len(self.knowledge_store)
-            ids = np.array(range(start_id, start_id + len(all_chunks)))
-            
-            self.index.add_with_ids(embeddings.astype('float32'), ids)
-            
-            # Store knowledge and metadata
-            for i, (chunk, meta) in enumerate(zip(all_chunks, all_metadata)):
-                knowledge_entry = KnowledgeEntry(
-                    content=chunk,
-                    metadata=meta,
-                    embedding=embeddings[i]
-                )
-                self.knowledge_store.append(knowledge_entry)
-                self.metadata_store.append(meta)
-            
-            # Save index
-            self.save_index()
-            
-            return {
-                "status": "success",
-                "chunks_added": len(all_chunks),
-                "total_knowledge_entries": len(self.knowledge_store)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error adding knowledge: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    def query_knowledge(
-        self, 
-        query: str, 
-        k: int = 5,
-        min_similarity: float = 0.3,
-        filter_metadata: Optional[Dict[str, Any]] = None
-    ) -> QueryResult:
-        """
-        Query the knowledge database for relevant context
-        """
-        try:
-            if self.index.ntotal == 0:
-                return QueryResult(
-                    query=query,
-                    similar_contexts=[],
-                    total_results=0,
-                    similarity_scores=[],
-                    retrieved_knowledge="No knowledge available in the database."
-                )
-            
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode([query], convert_to_numpy=True)
-            faiss.normalize_L2(query_embedding)
-            
-            # Search the index
-            similarities, indices = self.index.search(query_embedding.astype('float32'), k)
-            
-            # Filter results
-            similar_contexts = []
-            filtered_similarities = []
-            
-            for i, (similarity, idx) in enumerate(zip(similarities[0], indices[0])):
-                if idx == -1 or similarity < min_similarity:
-                    continue
-                    
-                knowledge_entry = self.knowledge_store[idx]
-                
-                # Apply metadata filter if provided
-                if filter_metadata:
-                    if not all(knowledge_entry.metadata.get(k) == v for k, v in filter_metadata.items()):
-                        continue
-                
-                context_info = {
-                    'content': knowledge_entry.content,
-                    'metadata': knowledge_entry.metadata,
-                    'similarity_score': float(similarity),
-                    'index': int(idx)
-                }
-                
-                similar_contexts.append(context_info)
-                filtered_similarities.append(float(similarity))
-            
-            # Combine retrieved knowledge
-            retrieved_knowledge = "\n\n".join([ctx['content'] for ctx in similar_contexts])
-            
-            return QueryResult(
-                query=query,
-                similar_contexts=similar_contexts,
-                total_results=len(similar_contexts),
-                similarity_scores=filtered_similarities,
-                retrieved_knowledge=retrieved_knowledge
-            )
-            
-        except Exception as e:
-            logger.error(f"Error querying knowledge: {e}")
-            return QueryResult(
-                query=query,
-                similar_contexts=[],
-                total_results=0,
-                similarity_scores=[],
-                retrieved_knowledge=f"Error querying knowledge: {str(e)}"
-            )
-    
-    def generate_contextual_prompt(
-        self,
-        user_query: str,
-        task_type: str = "general",
-        context_limit: int = 3,
-        category: Optional[str] = None,
-        include_metadata: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Generate a contextual prompt using retrieved knowledge
-        """
-        # try:
-        # Query for relevant context
-        knowledge_result = self.query_knowledge(user_query, k=context_limit)
-        
-        # Build context section
-        context_sections = []
-        for i, ctx in enumerate(knowledge_result.similar_contexts, 1):
-            context_section = f"Context {i} (Similarity: {ctx['similarity_score']:.3f}):\n{ctx['content']}"
-            
-            if include_metadata and ctx['metadata']:
-                relevant_metadata = {k: str(v).replace('{', '{{').replace('}', '}}') 
-                                for k, v in ctx['metadata'].items() 
-                                if k not in ['doc_index', 'chunk_index']}
-                if relevant_metadata:
-                    metadata_str = json.dumps(relevant_metadata, indent=2)
-                    context_section += f"\nMetadata: {metadata_str}"
-            
-            context_sections.append(context_section)
-        
-        context_text = "\n\n" + "="*50 + "\n\n".join(context_sections) if context_sections else "\n\nNo relevant context found in knowledge base."
-        
-        # Debug: Print context_text to inspect
-        print("Context Text:", context_text)
-        
-        # Generate enhanced prompt using LLM
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", 
-            """You are an expert prompt engineer. Given a user query, task type, and relevant context from a knowledge base, create an optimized prompt that:
-            
-            1. Incorporates the most relevant context
-            2. Is tailored for the specific task type: {{task_type}}
-            3. Provides clear instructions
-            4. Maintains context relevance
-            
-            Available Context:
-            {context_text}
-            
-            Task Type: {{task_type}}
-            Original Query: {{user_query}}
-            Category: {{category}}
-            
-            Generate a well-structured prompt that an AI agent can use effectively."""),
-            ("user", "Generate an optimized prompt for this query and context.")
-        ])
-        
-        # Use structured output for the prompt generation
-        class OptimizedPrompt(BaseModel):
-            enhanced_prompt: str = Field(description="The optimized prompt incorporating context")
-            context_summary: str = Field(description="Summary of key context used")
-            task_instructions: List[str] = Field(description="Specific instructions for the task")
-            confidence_score: float = Field(description="Confidence in context relevance (0-1)")
-        
-        prompt_generator = prompt_template | self.llm.with_structured_output(OptimizedPrompt)
-        optimized_prompt = prompt_generator.invoke({
-            "user_query": user_query,
-            "category":category if category else "uncategorized",
-            "task_type": task_type,
-            "context_text": context_text
-        })
-        
-        return {
-            "original_query": user_query,
-            "task_type": task_type,
-            "optimized_prompt": optimized_prompt.enhanced_prompt,
-            "context_summary": optimized_prompt.context_summary,
-            "task_instructions": optimized_prompt.task_instructions,
-            "confidence_score": optimized_prompt.confidence_score,
-            "contexts_used": knowledge_result.similar_contexts,
-            "knowledge_retrieved": knowledge_result.retrieved_knowledge
-        }
-            
-        # except Exception as e:
-        #     logger.error(f"Error generating contextual prompt: {e}")
-        #     return {
-        #         "original_query": user_query,
-        #         "task_type": task_type,
-        #         "category": category if category else "uncategorized",
-        #         "optimized_prompt": f"Error generating contextual prompt: {str(e)}",
-        #         "context_summary": "No context available due to error",
-        #         "task_instructions": [],
-        #         "confidence_score": 0.0,
-        #         "contexts_used": [],
-        #         "knowledge_retrieved": ""
-        #     }
-            
-    
-    def save_index(self):
-        """Save the current index and metadata to disk"""
-        try:
-            os.makedirs(os.path.dirname(self.index_path) if os.path.dirname(self.index_path) else '.', exist_ok=True)
-            
-            faiss.write_index(self.index, f"{self.index_path}.index")
-            
-            with open(f"{self.index_path}_metadata.pkl", 'wb') as f:
-                pickle.dump(self.metadata_store, f)
-                
-            with open(f"{self.index_path}_knowledge.pkl", 'wb') as f:
-                pickle.dump(self.knowledge_store, f)
-                
-            logger.info("Index saved successfully")
-            
-        except Exception as e:
-            logger.error(f"Error saving index: {e}")
-    
-    def get_knowledge_stats(self) -> Dict[str, Any]:
-        """Get statistics about the knowledge base"""
-        try:
-            total_entries = len(self.knowledge_store)
-            if total_entries == 0:
-                return {"total_entries": 0, "categories": {}, "avg_content_length": 0}
-            
-            categories = {}
-            total_length = 0
-            
-            for entry in self.knowledge_store:
-                total_length += len(entry.content)
-                category = entry.metadata.get('category', 'uncategorized')
-                categories[category] = categories.get(category, 0) + 1
-            
-            return {
-                "total_entries": total_entries,
-                "categories": categories,
-                "avg_content_length": total_length / total_entries,
-                "index_size": self.index.ntotal if self.index else 0
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting knowledge stats: {e}")
-            return {"error": str(e)}
+        self.embedding_model = SentenceTransformer(embedding_model)
+        self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
 
+        self.faiss_index_path = faiss_index_path
+        self.faiss_index, self.faiss_map = self._load_or_create_faiss_index()
+
+        self.mongo_client = MongoClient(mongo_uri)
+        self.mongo_db = self.mongo_client[mongo_db]
+        self.knowledge_col = self.mongo_db[knowledge_collection]
+        self.workflow_col = self.mongo_db[workflow_collection]
+
+    def _get_embedding(self, entry: Union[KnowledgeEntry, WorkflowMemory]) -> np.ndarray:
+        if entry.content and entry.content.text:
+            return self.embedding_model.encode([entry.content.text], convert_to_numpy=True)
+        else:
+            # Fallback: use query string
+            if isinstance(entry, KnowledgeEntry):
+                return self.embedding_model.encode([entry.query], convert_to_numpy=True)
+            else:
+                return self.embedding_model.encode([entry.original_query], convert_to_numpy=True)
+
+    def _load_or_create_faiss_index(self) -> (faiss.IndexFlatL2, Dict[int, Dict[str, Any]]):
+        index_file = f"{self.faiss_index_path}.index"
+        map_file = f"{self.faiss_index_path}_map.pkl"
+        if os.path.exists(index_file):
+            index = faiss.read_index(index_file)
+            with open(map_file, 'rb') as f:
+                map_dict = pickle.load(f)
+        else:
+            index = faiss.IndexFlatL2(self.embedding_dim)
+            map_dict = {}
+        return index, map_dict
+
+    def _save_faiss_index(self):
+        index_file = f"{self.faiss_index_path}.index"
+        map_file = f"{self.faiss_index_path}_map.pkl"
+        faiss.write_index(self.faiss_index, index_file)
+        with open(map_file, 'wb') as f:
+            pickle.dump(self.faiss_map, f)
+
+    def save_knowledge(self, entry: KnowledgeEntry) -> str:
+        doc = entry.dict()
+        self.knowledge_col.insert_one(doc)
+        vec = self._get_embedding(entry)
+        faiss_index = self.faiss_index.ntotal
+        self.faiss_index.add(vec.astype('float32'))
+        self.faiss_map[faiss_index] = {
+            "mongo_id": entry._id,
+            "type": "knowledge",
+            "category": entry.category,
+            "tags": entry.tags,
+            "user_id": entry.user_id
+        }
+        self._save_faiss_index()
+        return entry._id
+
+    def save_workflow(self, workflow: WorkflowMemory) -> str:
+        doc = workflow.dict()
+        self.workflow_col.insert_one(doc)
+        vec = self._get_embedding(workflow)
+        faiss_index = self.faiss_index.ntotal
+        self.faiss_index.add(vec.astype('float32'))
+        self.faiss_map[faiss_index] = {
+            "mongo_id": workflow._id,
+            "type": "workflow",
+            "category": workflow.category,
+            "tags": workflow.tags,
+            "user_id": workflow.user_id
+        }
+        self._save_faiss_index()
+        return workflow._id
+
+    def retrieve_similar(
+            self,
+            new_query: str,
+            category: Optional[str] = None,
+            tags: Optional[List[str]] = None,
+            user_id: Optional[str] = None,
+            top_k: int = 3,
+            similarity_threshold: float = 0.6,
+            keyword: Optional[str] = None,
+            years_filter: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        vec = self.embedding_model.encode([new_query], convert_to_numpy=True)
+        if self.faiss_index.ntotal == 0:
+            return []
+        distances, faiss_indices = self.faiss_index.search(vec.astype('float32'), k=top_k)
+        results = []
+        for dist, idx in zip(distances[0], faiss_indices[0]):
+            info = self.faiss_map.get(idx)
+            if not info or dist > similarity_threshold:
+                continue
+            # Hybrid: keyword/tag/user/category/time filtering
+            doc = None
+            if info["type"] == "workflow":
+                doc_data = self.workflow_col.find_one({"_id": info["mongo_id"]})
+                doc_obj = WorkflowMemory(**doc_data) if doc_data else None
+            else:
+                doc_data = self.knowledge_col.find_one({"_id": info["mongo_id"]})
+                doc_obj = KnowledgeEntry(**doc_data) if doc_data else None
+            if doc_obj:
+                # Filter by category/tags/user/keyword/year
+                if category and getattr(doc_obj, "category", None) != category:
+                    continue
+                if tags and not set(tags).intersection(set(getattr(doc_obj, "tags", []))):
+                    continue
+                if user_id and getattr(doc_obj, "user_id", None) != user_id:
+                    continue
+                if keyword and keyword not in (getattr(doc_obj, "query", "") + getattr(doc_obj, "solution", "")):
+                    continue
+                if years_filter:
+                    year = int(str(doc_obj.metadata.get("timestamp", "")).split("-")[0])
+                    from_year = datetime.now().year - years_filter
+                    if year < from_year:
+                        continue
+                results.append({"type": info["type"], "dist": dist, "entry": doc_obj})
+        return results
+
+    def update_rating(self, entry_id: str, is_workflow: bool, delta: int):
+        col = self.workflow_col if is_workflow else self.knowledge_col
+        doc = col.find_one({"_id": entry_id})
+        if doc:
+            new_rating = doc.get("rating", 0) + delta
+            col.update_one({"_id": entry_id}, {"$set": {"rating": new_rating}})
+            return new_rating
+        return None
+
+    def solve_with_memory(self, bug_or_query: str,
+                         category: Optional[str] = None,
+                         tags: Optional[List[str]] = None,
+                         user_id: Optional[str] = None,
+                         keyword: Optional[str] = None,
+                         years_filter: Optional[int] = None) -> Dict[str, Any]:
+        candidates = self.retrieve_similar(
+            bug_or_query, category, tags, user_id,
+            similarity_threshold=0.75, keyword=keyword,
+            years_filter=years_filter)
+        solution = ""
+        context_used = []
+        for candidate in sorted(candidates, key=lambda x: getattr(x["entry"], "rating", 0), reverse=True):
+            context_used.append({
+                "type": candidate["type"],
+                "category": candidate["entry"].category,
+                "tags": candidate["entry"].tags,
+                "rating": candidate["entry"].rating,
+                "user_id": candidate["entry"].user_id,
+                "match_query": getattr(candidate["entry"], "query", getattr(candidate["entry"], "original_query", "")),
+                "dist": candidate["dist"]
+            })
+            if candidate["type"] == "knowledge":
+                solution = candidate["entry"].solution
+                break
+            elif candidate["type"] == "workflow" and not solution:
+                solution = f"Workflow steps: {candidate['entry'].workflow_plan}\nFinal answer: {candidate['entry'].final_answer}"
+                if candidate['entry'].reasoning:
+                    solution += f"\nDecision Chain: {candidate['entry'].reasoning.chain}"
+        if not solution:
+            solution = "No relevant solution found. Try refining your query or add new knowledge."
+        # Save Q&A for future recall
+        new_kn = KnowledgeEntry(query=bug_or_query, solution=solution, category=category or "uncategorized", tags=tags or [], user_id=user_id)
+        self.save_knowledge(new_kn)
+        return {
+            "user_query": bug_or_query,
+            "solution": solution,
+            "category": category,
+            "contexts_used": context_used
+        }
+
+    def get_stats(self) -> Dict:
+        return {
+            "faiss_index_size": self.faiss_index.ntotal,
+            "knowledge_entries": self.knowledge_col.count_documents({}),
+            "workflow_entries": self.workflow_col.count_documents({}),
+            "categories": list(set([m.get("category") for m in self.faiss_map.values() if "category" in m]))
+        }
+
+# -- Example Usage --
+if __name__ == "__main__":
+    agent = UnifiedMemoryAgent()
+
+    # Save multi-modal knowledge (image, PDF transcript, tags, reasoning)
+    agent.save_knowledge(KnowledgeEntry(
+        query="Explain the Mona Lisa painting.",
+        solution="The Mona Lisa is painted by Leonardo da Vinci in the 16th century.",
+        category="art",
+        tags=["painting", "renaissance", "da vinci"],
+        metadata={"timestamp": "2023-07-01"},
+        content=MultiModalContent(
+            text="The Mona Lisa is a famous portrait...",
+            image_path="/images/monalisa.jpg"
+        ),
+        reasoning=ReasoningChain(chain=[
+            ReasonChainStep(step="Identify painting", evidence="Visual analysis"),
+            ReasonChainStep(step="Research artist", evidence="Historical records")
+        ])
+    ))
+
+    # Save workflow with user and tags
+    agent.save_workflow(WorkflowMemory(
+        original_query="Legal case: property dispute procedure",
+        workflow_plan=[
+            "Review all document evidence",
+            "Consult legal precedents (past 3 years)",
+            "Negotiate mediation",
+            "File formal complaint if unresolved"
+        ],
+        final_answer="Case resolved with mediation.",
+        category="legal",
+        tags=["dispute", "property", "mediation"],
+        metadata={"timestamp": "2022-05-05"},
+        user_id="lawyer42",
+        reasoning=ReasoningChain(chain=[
+            ReasonChainStep(step="Check mediation history"),
+            ReasonChainStep(step="Apply legal precedent")
+        ])
+    ))
+
+    # Search with hybrid tags/user/year filtering and give feedback
+    matches = agent.solve_with_memory(
+        "What's the procedure for property dispute mediation?",
+        category="legal",
+        tags=["mediation"],
+        years_filter=3,
+        user_id="lawyer42"
+    )
+    print("Legal retrieval by tags, user and year:", matches["solution"])
+    print("Context Used:", matches["contexts_used"])
+
+    # Upvote a workflow solution
+    if matches["contexts_used"]:
+        first_id = matches["contexts_used"][0]["match_query"]
+        agent.update_rating(first_id, is_workflow=True, delta=1)
+        print("Upvoted workflow rating.")
+
+    print("\n--- Stats ---")
+    print(agent.get_stats())

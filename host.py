@@ -10,8 +10,14 @@ import re
 from langgraph_super_agent import SuperAgentOrchestrator
 from agents import (
     Chatbot, WebSearchingAgent, DatabaseQueryOrchestrator, 
-    VectorKnowledgeAgent
+    UnifiedMemoryAgent
 )
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from config import SuperAgentConfig
+
 ppx_api_key = os.getenv("PERPLEXITY_API_KEY")
 
 # Configure logging
@@ -39,14 +45,14 @@ class SuperAgentFlaskApp:
             # Initialize your agents (same as in your original code)
             agents = {
                 "Chatbot": Chatbot(use_local=False, model_provider = 'perplexity', model= 'sonar', local_model="qwen3:4b", api_key=ppx_api_key), 
-                "DatabaseOrchestrator": DatabaseQueryOrchestrator(), 
-                "WebScrapingAgent": WebSearchingAgent(use_local=True, model_provider = 'perplexity', model= 'sonar', local_model="qwen3:4b", max_website_count=5, api_key=ppx_api_key),
-                # "VectorKnowlwdgeAgent": VectorKnowledgeAgent() 
+                "DatabaseOrchestrator": DatabaseQueryOrchestrator(use_local=False, model_provider='perplexity', model='sonar', api_key=ppx_api_key), 
+                "WebScrapingAgent": WebSearchingAgent(use_local=False, model_provider = 'perplexity', model= 'sonar', local_model="qwen3:4b", max_website_count=5, api_key=ppx_api_key),
+                "MemoryAgent": UnifiedMemoryAgent() 
                 # Add other agents as needed
             }
             
             # Create the orchestrator
-            self.orchestrator = SuperAgentOrchestrator(agents)
+            self.orchestrator = SuperAgentOrchestrator(agents, api_key=ppx_api_key, model_name='sonar', model_provider='perplexity', use_local=False)
             logger.info("SuperAgent Orchestrator initialized successfully")
             
         except Exception as e:

@@ -28,6 +28,13 @@ aiohttp
 # Data Processing  
 pandas
 openpyxl
+numpy 
+matplotlib
+seaborn
+plotly
+scikit-learn
+scipy
+# Tensorflow
 
 # Database
 # sqlite3  # Built into Python
@@ -44,3 +51,5 @@ colorlog
 
 ollama
 langchain-ollama
+
+pymongo
